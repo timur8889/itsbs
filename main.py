@@ -23,14 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-ADMIN_CHAT_IDS = ["5024165375", "ADMIN_CHAT_ID_2"]  # Замените на реальные chat_id админов
-BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на токен вашего бота
+ADMIN_CHAT_IDS = ["ADMIN_CHAT_ID_1", "ADMIN_CHAT_ID_2"]  # Замените на реальные chat_id админов
+BOT_TOKEN = "YOUR_BOT_TOKEN"  # Замените на токен вашего бота
 
 # Определяем этапы разговора
-NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE = range(5)
+NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO = range(6)
 
 # Клавиатуры
 confirm_keyboard = [['✅ Подтвердить', '✏️ Изменить']]
+photo_keyboard = [['📷 Добавить фото', '⏭️ Пропустить']]
 new_request_keyboard = [[InlineKeyboardButton('📝 Создать новую заявку', callback_data='new_request')]]
 system_type_keyboard = [
     ['📹 Видеонаблюдение', '🔐 СКУД'],
@@ -57,7 +58,8 @@ def send_admin_notification(context: CallbackContext, user_data: dict, user_id: 
         f"📞 Телефон: {user_data.get('phone', 'Не указан')}\n"
         f"📍 Участок: {user_data.get('plot', 'Не указан')}\n"
         f"🔧 Тип системы: {user_data.get('system_type', 'Не указан')}\n"
-        f"📝 Описание: {user_data.get('problem', 'Не указано')}\n\n"
+        f"📝 Описание: {user_data.get('problem', 'Не указано')}\n"
+        f"📸 Фото: {'Есть' if user_data.get('photo') else 'Нет'}\n\n"
         f"🕒 Время заявки: {user_data.get('timestamp', 'Не указано')}\n\n"
         f"💬 *Для ответа пользователю просто напишите сообщение в этот чат*"
     )
@@ -71,15 +73,24 @@ def send_admin_notification(context: CallbackContext, user_data: dict, user_id: 
     success_count = 0
     for admin_id in ADMIN_CHAT_IDS:
         try:
-            message = context.bot.send_message(
-                chat_id=admin_id,
-                text=notification_text,
-                parse_mode='Markdown'
-            )
-            # Сохраняем сообщение администратора
+            # Если есть фото, отправляем с фото
+            if user_data.get('photo'):
+                context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=user_data['photo'],
+                    caption=notification_text,
+                    parse_mode='Markdown'
+                )
+            else:
+                context.bot.send_message(
+                    chat_id=admin_id,
+                    text=notification_text,
+                    parse_mode='Markdown'
+                )
+            
+            # Сохраняем информацию о сообщении администратора
             user_requests[user_id]['admin_messages'].append({
-                'admin_id': admin_id,
-                'message_id': message.message_id
+                'admin_id': admin_id
             })
             success_count += 1
             logger.info(f"Уведомление отправлено администратору {admin_id}")
@@ -93,7 +104,7 @@ def forward_to_user(update: Update, context: CallbackContext) -> None:
     if str(update.message.from_user.id) not in ADMIN_CHAT_IDS:
         return
     
-    # Ищем пользователя по тексту сообщения
+    # Ищем пользователя по ID администратора
     user_id = None
     for uid, data in user_requests.items():
         for admin_msg in data['admin_messages']:
@@ -175,30 +186,13 @@ def start_from_button(update: Update, context: CallbackContext) -> int:
 
 def name(update: Update, context: CallbackContext) -> int:
     """Сохраняем имя и спрашиваем телефон."""
-    # Определяем откуда пришло сообщение - из команды или callback
-    if update.callback_query:
-        message = update.callback_query.message
-        text = update.callback_query.data
-    else:
-        message = update.message
-        text = update.message.text
-    
-    context.user_data['name'] = text
-    
-    if update.callback_query:
-        update.callback_query.message.reply_text(
-            '*📞 Укажите ваш контактный телефон:*\n\n'
-            'Пример: +7 999 123-45-67',
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode='Markdown'
-        )
-    else:
-        update.message.reply_text(
-            '*📞 Укажите ваш контактный телефон:*\n\n'
-            'Пример: +7 999 123-45-67',
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode='Markdown'
-        )
+    context.user_data['name'] = update.message.text
+    update.message.reply_text(
+        '*📞 Укажите ваш контактный телефон:*\n\n'
+        'Пример: +7 999 123-45-67',
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode='Markdown'
+    )
     return PHONE
 
 def phone(update: Update, context: CallbackContext) -> int:
@@ -242,13 +236,63 @@ def system_type(update: Update, context: CallbackContext) -> int:
     return PROBLEM
 
 def problem(update: Update, context: CallbackContext) -> int:
-    """Сохраняем описание проблемы и показываем summary."""
+    """Сохраняем описание проблемы и спрашиваем фото."""
+    context.user_data['problem'] = update.message.text
+    update.message.reply_text(
+        '*📸 Хотите добавить фото к заявке?*\n\n'
+        'Фото поможет специалисту лучше понять проблему.',
+        reply_markup=ReplyKeyboardMarkup(
+            photo_keyboard, 
+            one_time_keyboard=True, 
+            resize_keyboard=True
+        ),
+        parse_mode='Markdown'
+    )
+    return PHOTO
+
+def photo(update: Update, context: CallbackContext) -> int:
+    """Обрабатываем фото или пропуск."""
+    if update.message.text == '📷 Добавить фото':
+        update.message.reply_text(
+            '*📸 Отправьте фото:*\n\n'
+            'Вы можете отправить одно или несколько фото.',
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
+        )
+        return PHOTO
+    elif update.message.text == '⏭️ Пропустить':
+        context.user_data['photo'] = None
+        return show_summary(update, context)
+    else:
+        # Если пришло фото
+        if update.message.photo:
+            # Сохраняем file_id самого большого фото (последний элемент в списке)
+            context.user_data['photo'] = update.message.photo[-1].file_id
+            update.message.reply_text(
+                '✅ Фото добавлено!',
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return show_summary(update, context)
+        else:
+            update.message.reply_text(
+                '❌ Пожалуйста, отправьте фото или используйте кнопки.',
+                reply_markup=ReplyKeyboardMarkup(
+                    photo_keyboard, 
+                    one_time_keyboard=True, 
+                    resize_keyboard=True
+                )
+            )
+            return PHOTO
+
+def show_summary(update: Update, context: CallbackContext) -> int:
+    """Показываем сводку заявки."""
     from datetime import datetime
     
-    context.user_data['problem'] = update.message.text
     context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
     
     # Формируем сводку
+    photo_status = "✅ Есть" if context.user_data.get('photo') else "❌ Нет"
+    
     summary = (
         f"📋 *Сводка заявки:*\n\n"
         f"📛 *Имя:* {context.user_data['name']}\n"
@@ -256,20 +300,35 @@ def problem(update: Update, context: CallbackContext) -> int:
         f"📍 *Участок:* {context.user_data['plot']}\n"
         f"🔧 *Тип системы:* {context.user_data['system_type']}\n"
         f"📝 *Описание:* {context.user_data['problem']}\n"
+        f"📸 *Фото:* {photo_status}\n"
         f"🕒 *Время:* {context.user_data['timestamp']}"
     )
     
     context.user_data['summary'] = summary
-    update.message.reply_text(
-        f"{summary}\n\n"
-        "*Подтвердите отправку заявки или измените данные:*",
-        reply_markup=ReplyKeyboardMarkup(
-            confirm_keyboard, 
-            one_time_keyboard=True, 
-            resize_keyboard=True
-        ),
-        parse_mode='Markdown'
-    )
+    
+    # Если есть фото, отправляем сводку с фото
+    if context.user_data.get('photo'):
+        update.message.reply_photo(
+            photo=context.user_data['photo'],
+            caption=f"{summary}\n\n*Подтвердите отправку заявки или измените данные:*",
+            reply_markup=ReplyKeyboardMarkup(
+                confirm_keyboard, 
+                one_time_keyboard=True, 
+                resize_keyboard=True
+            ),
+            parse_mode='Markdown'
+        )
+    else:
+        update.message.reply_text(
+            f"{summary}\n\n"
+            "*Подтвердите отправку заявки или измените данные:*",
+            reply_markup=ReplyKeyboardMarkup(
+                confirm_keyboard, 
+                one_time_keyboard=True, 
+                resize_keyboard=True
+            ),
+            parse_mode='Markdown'
+        )
     return ConversationHandler.END
 
 def confirm(update: Update, context: CallbackContext) -> None:
@@ -375,14 +434,15 @@ def main() -> None:
             CallbackQueryHandler(start_from_button, pattern='^new_request$')
         ],
         states={
-            NAME: [
-                MessageHandler(Filters.text & ~Filters.command, name),
-                CallbackQueryHandler(name, pattern='^.+$')
-            ],
+            NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
             PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
             PLOT: [MessageHandler(Filters.text & ~Filters.command, plot)],
             SYSTEM_TYPE: [MessageHandler(Filters.text & ~Filters.command, system_type)],
             PROBLEM: [MessageHandler(Filters.text & ~Filters.command, problem)],
+            PHOTO: [
+                MessageHandler(Filters.text & ~Filters.command, photo),
+                MessageHandler(Filters.photo, photo)
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -394,7 +454,7 @@ def main() -> None:
     # Обработчик сообщений от администраторов
     dispatcher.add_handler(MessageHandler(
         Filters.chat([int(chat_id) for chat_id in ADMIN_CHAT_IDS if chat_id.isdigit()]) & 
-        Filters.text & ~Filters.command, 
+        (Filters.text | Filters.photo | Filters.document) & ~Filters.command, 
         forward_to_user
     ))
 
