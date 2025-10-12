@@ -97,8 +97,8 @@ def phone(update: Update, context: CallbackContext) -> int:
     context.user_data['phone'] = update.message.text
     update.message.reply_text(
         '*📍 Укажите адрес участка:*\n\n'
-        'Пример: г. Москва, ул. Примерная, д. 10\n'
-        'Или: МО, д. Иваново, участок №25',
+        'Пример: Фрезерный устасток
+        'Или: Токарный участок
         reply_markup=ReplyKeyboardRemove(),
         parse_mode='Markdown'
     )
