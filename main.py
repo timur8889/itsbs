@@ -24,15 +24,15 @@ ADMIN_CHAT_IDS = ["5024165375", "ADMIN_CHAT_ID_2"]  # Замените на ре
 BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на токен вашего бота
 
 # Определяем этапы разговора
-NAME, PHONE, ADDRESS, PROBLEM, SYSTEM_TYPE = range(5)
+NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE = range(5)
 
 # Клавиатуры
 confirm_keyboard = [['✅ Подтвердить', '✏️ Изменить']]
 system_type_keyboard = [
     ['📹 Видеонаблюдение', '🔐 СКУД'],
-    ['📞 Телефония', '🌐 Сеть'],
-    ['🎵 Аудио', '⚡ Электрика'],
-    ['❓ Другое']
+    ['📞 Телефония', '🌐 Компьютерная сеть'],
+    ['🎵 Аудиосистема', '🚨 Охранная сигнализация'],
+    ['🏠 Домофонная система', '❓ Другое']
 ]
 
 def send_admin_notification(context: CallbackContext, user_data: dict, chat_id: str = None) -> None:
@@ -44,7 +44,7 @@ def send_admin_notification(context: CallbackContext, user_data: dict, chat_id: 
         f"{user_info}\n"
         f"📛 Имя: {user_data.get('name', 'Не указано')}\n"
         f"📞 Телефон: {user_data.get('phone', 'Не указан')}\n"
-        f"📍 Адрес: {user_data.get('address', 'Не указан')}\n"
+        f"📍 Участок: {user_data.get('plot', 'Не указан')}\n"
         f"🔧 Тип системы: {user_data.get('system_type', 'Не указан')}\n"
         f"📝 Описание: {user_data.get('problem', 'Не указано')}\n\n"
         f"🕒 Время заявки: {user_data.get('timestamp', 'Не указано')}"
@@ -93,19 +93,20 @@ def name(update: Update, context: CallbackContext) -> int:
     return PHONE
 
 def phone(update: Update, context: CallbackContext) -> int:
-    """Сохраняем телефон и спрашиваем адрес."""
+    """Сохраняем телефон и спрашиваем участок."""
     context.user_data['phone'] = update.message.text
     update.message.reply_text(
-        '*📍 Укажите адрес объекта:*\n\n'
-        'Пример: г. Москва, ул. Примерная, д. 10, кв. 25',
+        '*📍 Укажите адрес участка:*\n\n'
+        'Пример: г. Москва, ул. Примерная, д. 10\n'
+        'Или: МО, д. Иваново, участок №25',
         reply_markup=ReplyKeyboardRemove(),
         parse_mode='Markdown'
     )
-    return ADDRESS
+    return PLOT
 
-def address(update: Update, context: CallbackContext) -> int:
-    """Сохраняем адрес и спрашиваем тип системы."""
-    context.user_data['address'] = update.message.text
+def plot(update: Update, context: CallbackContext) -> int:
+    """Сохраняем участок и спрашиваем тип системы."""
+    context.user_data['plot'] = update.message.text
     update.message.reply_text(
         '*🔧 Выберите тип слаботочной системы:*',
         reply_markup=ReplyKeyboardMarkup(
@@ -122,7 +123,8 @@ def system_type(update: Update, context: CallbackContext) -> int:
     context.user_data['system_type'] = update.message.text
     update.message.reply_text(
         '*📝 Опишите проблему или необходимые работы:*\n\n'
-        'Пример: Не работает видеонаблюдение на входе, требуется диагностика и ремонт',
+        'Пример: Не работает видеонаблюдение на входе, требуется диагностика и ремонт\n'
+        'Или: Нужно установить домофонную систему на участке',
         reply_markup=ReplyKeyboardRemove(),
         parse_mode='Markdown'
     )
@@ -140,7 +142,7 @@ def problem(update: Update, context: CallbackContext) -> int:
         f"📋 *Сводка заявки:*\n\n"
         f"📛 *Имя:* {context.user_data['name']}\n"
         f"📞 *Телефон:* `{context.user_data['phone']}`\n"
-        f"📍 *Адрес:* {context.user_data['address']}\n"
+        f"📍 *Участок:* {context.user_data['plot']}\n"
         f"🔧 *Тип системы:* {context.user_data['system_type']}\n"
         f"📝 *Описание:* {context.user_data['problem']}\n"
         f"🕒 *Время:* {context.user_data['timestamp']}"
@@ -246,7 +248,7 @@ def main() -> None:
         states={
             NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
             PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
-            ADDRESS: [MessageHandler(Filters.text & ~Filters.command, address)],
+            PLOT: [MessageHandler(Filters.text & ~Filters.command, plot)],
             SYSTEM_TYPE: [MessageHandler(Filters.text & ~Filters.command, system_type)],
             PROBLEM: [MessageHandler(Filters.text & ~Filters.command, problem)],
         },
@@ -260,10 +262,6 @@ def main() -> None:
     # Запускаем бота
     logger.info("Бот запущен и готов к работе!")
     updater.start_polling()
-    updater.idle()
-
-if __name__ == '__main__':
-    main()
     updater.idle()
 
 if __name__ == '__main__':
