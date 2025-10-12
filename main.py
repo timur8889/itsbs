@@ -201,7 +201,7 @@ class Database:
                     COUNT(*) as total_requests,
                     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new,
-                    SUM(CASE WHEN urgency = '🔴 Срочно' THEN 1 ELSE 0 END) as urgent
+                    SUM(CASE WHEN urgency LIKE '%Срочно%' THEN 1 ELSE 0 END) as urgent
                 FROM requests 
                 WHERE created_at >= ?
             ''', (start_date,))
@@ -223,8 +223,8 @@ class Database:
                 WHERE status IN ('new', 'in_progress') 
                 ORDER BY 
                     CASE urgency 
-                        WHEN '🔴 Срочно' THEN 1
-                        WHEN '🟡 Средняя срочность' THEN 2
+                        WHEN '🔴 Срочно (в течение 2 часов)' THEN 1
+                        WHEN '🟡 Средняя срочность (сегодня)' THEN 2
                         ELSE 3
                     END,
                     created_at DESC
@@ -237,7 +237,7 @@ db = Database(DB_PATH)
 def send_admin_notification(context: CallbackContext, user_data: Dict, request_id: int) -> None:
     """Отправляет уведомление администраторам"""
     user_info = f"👤 Пользователь: @{user_data.get('username', 'Не указан')}"
-    urgency_icon = user_data.get('urgency', '🟢 Не срочно')
+    urgency_icon = user_data.get('urgency', '🟢 Не срочно (в течение 3 дней)')
     
     notification_text = (
         f"🚨 *НОВАЯ ЗАЯВКА #{request_id}*\n\n"
@@ -363,12 +363,7 @@ def start(update: Update, context: CallbackContext) -> int:
     context.user_data['username'] = user.username
     
     welcome_text = (
-        "🏠 *Добро пожаловать в сервис заявок для слаботочных систем!*\n\n"
-        "✨ *Преимущества нашего сервиса:*\n"
-        "• 🚀 Быстрое реагирование\n"
-        "• 🔧 Квалифицированные специалисты\n"
-        "• 💰 Прозрачные цены\n"
-        "• 🔒 Гарантия на работы\n\n"
+        "🏠 *Добро пожаловать в сервис заявок для слаботочных систем завода Контакт!*\n\n"
         "Для оформления заявки нам потребуется некоторая информация.\n"
         "Заполните данные последовательно.\n\n"
         "*📛 Как к вам обращаться?*"
@@ -545,42 +540,51 @@ def confirm(update: Update, context: CallbackContext) -> int:
     if update.message.text == '✅ Подтвердить':
         user = update.message.from_user
         
-        # Сохраняем заявку в базу данных
-        request_id = db.save_request(context.user_data)
-        
-        # Отправляем уведомление администраторам
-        success_count = send_admin_notification(context, context.user_data, request_id)
-        
-        if success_count > 0:
-            # Отправляем подтверждение пользователю
-            confirmation_text = (
-                f"✅ *Заявка #{request_id} успешно отправлена!*\n\n"
-                f"📞 Наш специалист свяжется с вами в ближайшее время.\n"
-                f"⏱️ *Срочность:* {context.user_data['urgency']}\n\n"
-                f"💡 *Что дальше?*\n"
-                f"• Ожидайте звонка нашего специалиста\n"
-                f"• Будьте готовы показать проблему на месте\n"
-                f"• Имейте под рукой доступ к участку\n\n"
-                f"_Спасибо, что выбрали наш сервис!_ 🛠️"
-            )
+        try:
+            # Сохраняем заявку в базу данных
+            request_id = db.save_request(context.user_data)
             
-            update.message.reply_text(
-                confirmation_text,
-                reply_markup=ReplyKeyboardRemove(),
-                parse_mode=ParseMode.MARKDOWN
-            )
+            # Отправляем уведомление администраторам
+            success_count = send_admin_notification(context, context.user_data, request_id)
             
-            # Отправляем кнопку для создания новой заявки
-            update.message.reply_text(
-                'Если у вас есть еще вопросы или проблемы - создайте новую заявку:',
-                reply_markup=InlineKeyboardMarkup(new_request_keyboard)
-            )
-            
-            logger.info(f"Новая заявка #{request_id} от {user.username}")
-        else:
+            if success_count > 0:
+                # Отправляем подтверждение пользователю
+                confirmation_text = (
+                    f"✅ *Заявка #{request_id} успешно отправлена!*\n\n"
+                    f"📞 Наш специалист свяжется с вами в ближайшее время.\n"
+                    f"⏱️ *Срочность:* {context.user_data['urgency']}\n\n"
+                    f"💡 *Что дальше?*\n"
+                    f"• Ожидайте звонка нашего специалиста\n"
+                    f"• Будьте готовы показать проблему на месте\n"
+                    f"• Имейте под рукой доступ к участку\n\n"
+                    f"_Спасибо, что выбрали наш сервис!_ 🛠️"
+                )
+                
+                update.message.reply_text(
+                    confirmation_text,
+                    reply_markup=ReplyKeyboardRemove(),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Отправляем кнопку для создания новой заявки
+                update.message.reply_text(
+                    'Если у вас есть еще вопросы или проблемы - создайте новую заявку:',
+                    reply_markup=InlineKeyboardMarkup(new_request_keyboard)
+                )
+                
+                logger.info(f"Новая заявка #{request_id} от {user.username}")
+            else:
+                update.message.reply_text(
+                    '❌ *Произошла ошибка при отправке заявки.*\n\n'
+                    'Пожалуйста, попробуйте позже или свяжитесь с нами по телефону.',
+                    reply_markup=ReplyKeyboardRemove(),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении заявки: {e}")
             update.message.reply_text(
                 '❌ *Произошла ошибка при отправке заявки.*\n\n'
-                'Пожалуйста, попробуйте позже или свяжитесь с нами по телефону.',
+                'Пожалуйста, попробуйте позже.',
                 reply_markup=ReplyKeyboardRemove(),
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -588,6 +592,7 @@ def confirm(update: Update, context: CallbackContext) -> int:
         context.user_data.clear()
         return ConversationHandler.END
     else:
+        # Начинаем заново
         update.message.reply_text(
             '✏️ *Давайте начнем заполнение заново.*\n\n'
             'Как к вам обращаться?',
@@ -596,13 +601,25 @@ def confirm(update: Update, context: CallbackContext) -> int:
         )
         return NAME
 
-def new_request_callback(update: Update, context: CallbackContext) -> int:
+def new_request_callback(update: Update, context: CallbackContext) -> None:
     """Обработчик кнопки создания новой заявки"""
     query = update.callback_query
     query.answer()
     
     # Запускаем процесс создания новой заявки
-    return start_from_button(update, context)
+    context.user_data.clear()
+    
+    user = query.from_user
+    context.user_data['user_id'] = user.id
+    context.user_data['username'] = user.username
+    
+    query.edit_message_text(
+        '✏️ *Давайте создадим новую заявку!*\n\n'
+        'Как к вам обращаться?',
+        parse_mode=ParseMode.MARKDOWN
+    )
+    # Возвращаем состояние NAME для продолжения разговора
+    return NAME
 
 def start_from_button(update: Update, context: CallbackContext) -> int:
     """Начинаем разговор из кнопки"""
@@ -804,6 +821,9 @@ def main() -> None:
         # Регистрируем обработчики
         dispatcher.add_handler(conv_handler)
         dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить|✏️ Изменить)$'), confirm))
+        
+        # Обработчик для кнопки "Создать новую заявку"
+        dispatcher.add_handler(CallbackQueryHandler(new_request_callback, pattern='^new_request$'))
         
         # Админ-команды
         dispatcher.add_handler(CommandHandler('admin', admin_panel))
