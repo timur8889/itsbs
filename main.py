@@ -3,6 +3,8 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from telegram.ext import (
     Updater,
@@ -11,6 +13,7 @@ from telegram.ext import (
     Filters,
     ConversationHandler,
     CallbackContext,
+    CallbackQueryHandler,
 )
 
 # Включим логирование
@@ -28,42 +31,107 @@ NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE = range(5)
 
 # Клавиатуры
 confirm_keyboard = [['✅ Подтвердить', '✏️ Изменить']]
+new_request_keyboard = [[InlineKeyboardButton('📝 Создать новую заявку', callback_data='new_request')]]
 system_type_keyboard = [
     ['📹 Видеонаблюдение', '🔐 СКУД'],
-    ['📞 Телефония', '🌐 Компьютерная сеть'],
-    ['🎵 Аудиосистема', '🚨 Охранная сигнализация'],
-    ['🏠 Домофонная система', '❓ Другое']
+    ['🌐 Компьютерная сеть', '🚨 Пожарная сигнализация'],
+    ['❓ Другое']
+]
+plot_type_keyboard = [
+    ['Фрезерный участок', 'Токарный участок'],
+    ['Участок штамповки', 'Другой участок']
 ]
 
-def send_admin_notification(context: CallbackContext, user_data: dict, chat_id: str = None) -> None:
+# Хранилище для связи пользователей и администраторов
+user_requests = {}
+
+def send_admin_notification(context: CallbackContext, user_data: dict, user_id: int, chat_id: str = None) -> None:
     """Отправляет уведомление администраторам"""
     user_info = f"👤 Пользователь: @{chat_id}" if chat_id else "👤 Пользователь: Не указан"
     
     notification_text = (
         f"🚨 *НОВАЯ ЗАЯВКА*\n\n"
         f"{user_info}\n"
+        f"🆔 ID: {user_id}\n"
         f"📛 Имя: {user_data.get('name', 'Не указано')}\n"
         f"📞 Телефон: {user_data.get('phone', 'Не указан')}\n"
         f"📍 Участок: {user_data.get('plot', 'Не указан')}\n"
         f"🔧 Тип системы: {user_data.get('system_type', 'Не указан')}\n"
         f"📝 Описание: {user_data.get('problem', 'Не указано')}\n\n"
-        f"🕒 Время заявки: {user_data.get('timestamp', 'Не указано')}"
+        f"🕒 Время заявки: {user_data.get('timestamp', 'Не указано')}\n\n"
+        f"💬 *Для ответа пользователю просто напишите сообщение в этот чат*"
     )
+    
+    # Сохраняем информацию о заявке
+    user_requests[user_id] = {
+        'user_data': user_data.copy(),
+        'admin_messages': []
+    }
     
     success_count = 0
     for admin_id in ADMIN_CHAT_IDS:
         try:
-            context.bot.send_message(
+            message = context.bot.send_message(
                 chat_id=admin_id,
                 text=notification_text,
                 parse_mode='Markdown'
             )
+            # Сохраняем сообщение администратора
+            user_requests[user_id]['admin_messages'].append({
+                'admin_id': admin_id,
+                'message_id': message.message_id
+            })
             success_count += 1
             logger.info(f"Уведомление отправлено администратору {admin_id}")
         except Exception as e:
             logger.error(f"Ошибка отправки администратору {admin_id}: {e}")
     
     return success_count
+
+def forward_to_user(update: Update, context: CallbackContext) -> None:
+    """Пересылает сообщение администратора пользователю"""
+    if str(update.message.from_user.id) not in ADMIN_CHAT_IDS:
+        return
+    
+    # Ищем пользователя по тексту сообщения
+    user_id = None
+    for uid, data in user_requests.items():
+        for admin_msg in data['admin_messages']:
+            if admin_msg['admin_id'] == str(update.message.from_user.id):
+                user_id = uid
+                break
+        if user_id:
+            break
+    
+    if user_id:
+        try:
+            # Пересылаем сообщение пользователю
+            if update.message.text:
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"💬 *Сообщение от специалиста:*\n\n{update.message.text}",
+                    parse_mode='Markdown'
+                )
+            elif update.message.photo:
+                context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=update.message.photo[-1].file_id,
+                    caption=f"💬 *Сообщение от специалиста:*\n\n{update.message.caption}" if update.message.caption else "💬 Сообщение от специалиста",
+                    parse_mode='Markdown'
+                )
+            elif update.message.document:
+                context.bot.send_document(
+                    chat_id=user_id,
+                    document=update.message.document.file_id,
+                    caption=f"💬 *Сообщение от специалиста:*\n\n{update.message.caption}" if update.message.caption else "💬 Сообщение от специалиста",
+                    parse_mode='Markdown'
+                )
+            
+            update.message.reply_text("✅ Сообщение отправлено пользователю")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения пользователю: {e}")
+            update.message.reply_text("❌ Ошибка отправки сообщения пользователю")
 
 def start(update: Update, context: CallbackContext) -> int:
     """Начинаем разговор и спрашиваем имя."""
@@ -96,10 +164,12 @@ def phone(update: Update, context: CallbackContext) -> int:
     """Сохраняем телефон и спрашиваем участок."""
     context.user_data['phone'] = update.message.text
     update.message.reply_text(
-        '*📍 Укажите адрес участка:*\n\n'
-        'Пример: Фрезерный устасток
-        'Или: Токарный участок
-        reply_markup=ReplyKeyboardRemove(),
+        '*📍 Выберите тип участка:*',
+        reply_markup=ReplyKeyboardMarkup(
+            plot_type_keyboard, 
+            one_time_keyboard=True, 
+            resize_keyboard=True
+        ),
         parse_mode='Markdown'
     )
     return PLOT
@@ -123,8 +193,8 @@ def system_type(update: Update, context: CallbackContext) -> int:
     context.user_data['system_type'] = update.message.text
     update.message.reply_text(
         '*📝 Опишите проблему или необходимые работы:*\n\n'
-        'Пример: Не работает видеонаблюдение на входе, требуется диагностика и ремонт\n'
-        'Или: Нужно установить домофонную систему на участке',
+        'Пример: Не работает видеонаблюдение на фрезерном участке\n'
+        'Или: Требуется установка пожарной сигнализации на участке штамповки',
         reply_markup=ReplyKeyboardRemove(),
         parse_mode='Markdown'
     )
@@ -170,11 +240,12 @@ def confirm(update: Update, context: CallbackContext) -> None:
         success_count = send_admin_notification(
             context, 
             context.user_data,
+            user.id,
             user.username
         )
         
         if success_count > 0:
-            # Отправляем подтверждение пользователю
+            # Отправляем подтверждение пользователю с кнопкой новой заявки
             update.message.reply_text(
                 '✅ *Заявка успешно отправлена!*\n\n'
                 '📞 Наш специалист свяжется с вами в ближайшее время.\n'
@@ -182,6 +253,12 @@ def confirm(update: Update, context: CallbackContext) -> None:
                 '_Спасибо, что выбрали наш сервис!_ 🛠️',
                 reply_markup=ReplyKeyboardRemove(),
                 parse_mode='Markdown'
+            )
+            
+            # Отправляем кнопку для создания новой заявки
+            update.message.reply_text(
+                'Если у вас есть еще вопросы или проблемы - создайте новую заявку:',
+                reply_markup=InlineKeyboardMarkup(new_request_keyboard)
             )
             
             # Логируем успешную заявку
@@ -206,6 +283,21 @@ def confirm(update: Update, context: CallbackContext) -> None:
         )
         return NAME
 
+def new_request_callback(update: Update, context: CallbackContext) -> None:
+    """Обработчик кнопки создания новой заявки"""
+    query = update.callback_query
+    query.answer()
+    
+    query.edit_message_text(
+        '📝 *Создание новой заявки*\n\n'
+        'Как к вам обращаться?',
+        parse_mode='Markdown'
+    )
+    
+    # Запускаем процесс заново
+    context.user_data.clear()
+    return NAME
+
 def cancel(update: Update, context: CallbackContext) -> int:
     """Отменяем разговор."""
     update.message.reply_text(
@@ -228,9 +320,9 @@ def admin_stats(update: Update, context: CallbackContext) -> None:
     # Здесь можно добавить логику для сбора статистики
     stats_text = (
         "📊 *Статистика бота*\n\n"
-        "👥 Администраторы: 2\n"
+        f"👥 Активных заявок: {len(user_requests)}\n"
         "🔄 Бот работает стабильно\n"
-        "📈 За сегодня заявок: 5\n"
+        "📈 Всего заявок за сегодня: 5\n"
         "✅ Обработано: 3\n"
         "⏳ В работе: 2"
     )
@@ -257,7 +349,15 @@ def main() -> None:
 
     dispatcher.add_handler(conv_handler)
     dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить|✏️ Изменить)$'), confirm))
+    dispatcher.add_handler(CallbackQueryHandler(new_request_callback, pattern='^new_request$'))
     dispatcher.add_handler(CommandHandler('stats', admin_stats))
+    
+    # Обработчик сообщений от администраторов
+    dispatcher.add_handler(MessageHandler(
+        Filters.chat([int(chat_id) for chat_id in ADMIN_CHAT_IDS if chat_id.isdigit()]) & 
+        Filters.text & ~Filters.command, 
+        forward_to_user
+    ))
 
     # Запускаем бота
     logger.info("Бот запущен и готов к работе!")
