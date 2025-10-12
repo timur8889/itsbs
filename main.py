@@ -135,6 +135,9 @@ def forward_to_user(update: Update, context: CallbackContext) -> None:
 
 def start(update: Update, context: CallbackContext) -> int:
     """Начинаем разговор и спрашиваем имя."""
+    # Очищаем данные пользователя при старте
+    context.user_data.clear()
+    
     user = update.message.from_user
     context.user_data['user_id'] = user.id
     context.user_data['username'] = user.username
@@ -149,15 +152,53 @@ def start(update: Update, context: CallbackContext) -> int:
     )
     return NAME
 
-def name(update: Update, context: CallbackContext) -> int:
-    """Сохраняем имя и спрашиваем телефон."""
-    context.user_data['name'] = update.message.text
-    update.message.reply_text(
-        '*📞 Укажите ваш контактный телефон:*\n\n'
-        'Пример: +7 999 123-45-67',
-        reply_markup=ReplyKeyboardRemove(),
+def start_from_button(update: Update, context: CallbackContext) -> int:
+    """Начинаем разговор из кнопки и спрашиваем имя."""
+    query = update.callback_query
+    query.answer()
+    
+    # Очищаем данные пользователя
+    context.user_data.clear()
+    
+    user = query.from_user
+    context.user_data['user_id'] = user.id
+    context.user_data['username'] = user.username
+    
+    query.edit_message_text(
+        '🏠 *Добро пожаловать в сервис заявок для слаботочных систем!*\n\n'
+        'Для оформления заявки нам потребуется некоторая информация.\n'
+        'Заполните данные последовательно.\n\n'
+        '*Как к вам обращаться?*',
         parse_mode='Markdown'
     )
+    return NAME
+
+def name(update: Update, context: CallbackContext) -> int:
+    """Сохраняем имя и спрашиваем телефон."""
+    # Определяем откуда пришло сообщение - из команды или callback
+    if update.callback_query:
+        message = update.callback_query.message
+        text = update.callback_query.data
+    else:
+        message = update.message
+        text = update.message.text
+    
+    context.user_data['name'] = text
+    
+    if update.callback_query:
+        update.callback_query.message.reply_text(
+            '*📞 Укажите ваш контактный телефон:*\n\n'
+            'Пример: +7 999 123-45-67',
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
+        )
+    else:
+        update.message.reply_text(
+            '*📞 Укажите ваш контактный телефон:*\n\n'
+            'Пример: +7 999 123-45-67',
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
+        )
     return PHONE
 
 def phone(update: Update, context: CallbackContext) -> int:
@@ -283,20 +324,13 @@ def confirm(update: Update, context: CallbackContext) -> None:
         )
         return NAME
 
-def new_request_callback(update: Update, context: CallbackContext) -> None:
-    """Обработчик кнопки создания новой заявки"""
+def new_request_callback(update: Update, context: CallbackContext) -> int:
+    """Обработчик кнопки создания новой заявки - запускает start"""
     query = update.callback_query
     query.answer()
     
-    query.edit_message_text(
-        '📝 *Создание новой заявки*\n\n'
-        'Как к вам обращаться?',
-        parse_mode='Markdown'
-    )
-    
-    # Запускаем процесс заново
-    context.user_data.clear()
-    return NAME
+    # Запускаем процесс создания новой заявки
+    return start_from_button(update, context)
 
 def cancel(update: Update, context: CallbackContext) -> int:
     """Отменяем разговор."""
@@ -336,9 +370,15 @@ def main() -> None:
 
     # Определяем обработчик разговора
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[
+            CommandHandler('start', start),
+            CallbackQueryHandler(start_from_button, pattern='^new_request$')
+        ],
         states={
-            NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
+            NAME: [
+                MessageHandler(Filters.text & ~Filters.command, name),
+                CallbackQueryHandler(name, pattern='^.+$')
+            ],
             PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
             PLOT: [MessageHandler(Filters.text & ~Filters.command, plot)],
             SYSTEM_TYPE: [MessageHandler(Filters.text & ~Filters.command, system_type)],
@@ -349,7 +389,6 @@ def main() -> None:
 
     dispatcher.add_handler(conv_handler)
     dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить|✏️ Изменить)$'), confirm))
-    dispatcher.add_handler(CallbackQueryHandler(new_request_callback, pattern='^new_request$'))
     dispatcher.add_handler(CommandHandler('stats', admin_stats))
     
     # Обработчик сообщений от администраторов
