@@ -323,6 +323,24 @@ class Database:
             
             conn.commit()
 
+    def get_my_in_progress_requests(self, admin_name: str, limit: int = 50) -> List[Dict]:
+        """Получает заявки, которые взял в работу конкретный администратор"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM requests 
+                WHERE assigned_admin = ? AND status = 'in_progress'
+                ORDER BY 
+                    CASE urgency 
+                        WHEN '🔴 Срочно (2 часа)' THEN 1
+                        WHEN '🟡 Средняя (сегодня)' THEN 2
+                        ELSE 3
+                    END,
+                    created_at DESC
+                LIMIT ?
+            ''', (admin_name, limit))
+            return [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
+
 # Инициализация базы данных
 db = Database(DB_PATH)
 
@@ -483,25 +501,31 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    requests = db.get_requests_by_filter(filter_type, 50)
-    
-    filter_names = {
-        'new': '🆕 Новые заявки',
-        'in_progress': '🔄 Заявки в работе', 
-        'urgent': '🚨 Срочные заявки',
-        'completed': '✅ Завершенные заявки',
-        'all': '📋 Все активные заявки'
-    }
+    if filter_type == 'my_in_progress':
+        # Показываем заявки, которые взял в работу текущий администратор
+        admin_name = update.message.from_user.first_name
+        requests = db.get_my_in_progress_requests(admin_name, 50)
+        filter_name = f'🔄 Мои заявки в работе ({len(requests)})'
+    else:
+        requests = db.get_requests_by_filter(filter_type, 50)
+        filter_names = {
+            'new': '🆕 Новые заявки',
+            'in_progress': '🔄 Все заявки в работе', 
+            'urgent': '🚨 Срочные заявки',
+            'completed': '✅ Завершенные заявки',
+            'all': '📋 Все активные заявки'
+        }
+        filter_name = f"{filter_names[filter_type]} ({len(requests)})"
     
     if not requests:
         update.message.reply_text(
-            f"📭 {filter_names[filter_type]} отсутствуют.",
+            f"📭 {filter_name} отсутствуют.",
             reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
         )
         return
     
     update.message.reply_text(
-        f"{filter_names[filter_type]} ({len(requests)}):",
+        filter_name,
         reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
     )
     
@@ -522,8 +546,14 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('assigned_admin'):
             request_text += f"\n👨‍💼 *Исполнитель:* {req['assigned_admin']}"
         
-        # Для новых заявок показываем кнопку "Взять в работу", для остальных - "Подробнее"
-        if req['status'] == 'new' and filter_type != 'completed':
+        # Определяем кнопки в зависимости от типа фильтра
+        if filter_type == 'my_in_progress':
+            # Для моих заявок в работе показываем кнопку "Выполнено"
+            keyboard = [[
+                InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}"),
+                InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
+            ]]
+        elif req['status'] == 'new' and filter_type != 'completed':
             keyboard = [[
                 InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}")
             ]]
@@ -648,24 +678,86 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             
             request_text += f"🕒 *Создана:* {request['created_at'][:16]}\n"
             
-            keyboard = [[
-                InlineKeyboardButton("✅ Завершить", callback_data=f"complete_{request_id}"),
-                InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
-            ]]
+            # Определяем кнопки в зависимости от статуса заявки
+            if request['status'] == 'in_progress' and request.get('assigned_admin') == query.from_user.first_name:
+                # Если заявка в работе и текущий админ - исполнитель
+                keyboard = [[
+                    InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
+                    InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
+                ]]
+            elif request['status'] == 'in_progress':
+                keyboard = [[
+                    InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
+                ]]
+            else:
+                keyboard = None
             
             # Редактируем существующее сообщение
             if query.message.caption:
                 query.edit_message_caption(
                     caption=request_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 query.edit_message_text(
                     request_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
                     parse_mode=ParseMode.MARKDOWN
                 )
+    
+    elif data.startswith('complete_'):
+        request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        # Обновляем статус заявки на "выполнено"
+        db.update_request_status(
+            request_id, 
+            "completed", 
+            f"Заявка выполнена администратором {admin_name}",
+            admin_name
+        )
+        
+        # Получаем информацию о заявке для уведомления пользователя
+        request = db.get_request(request_id)
+        if request and request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"✅ *Ваша заявка #{request_id} выполнена!*\n\n"
+                         f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                         f"💬 *Комментарий:* Заявка выполнена\n\n"
+                         f"_Спасибо, что воспользовались нашими услугами!_ 🛠️",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
+        
+        # Обновляем сообщение с заявкой
+        request_text = (
+            f"✅ *Заявка #{request_id} выполнена!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem'][:100]}...\n\n"
+            f"✅ *Статус:* Выполнено\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}\n"
+            f"💬 *Комментарий:* Заявка выполнена"
+        )
+        
+        # Удаляем inline-клавиатуру
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                request_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
 
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 
@@ -707,7 +799,8 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     elif text == '🆕 Новые заявки':
         return show_requests_by_filter(update, context, 'new')
     elif text == '🔄 В работе':
-        return show_requests_by_filter(update, context, 'in_progress')
+        # Показываем заявки, которые взял в работу текущий администратор
+        return show_requests_by_filter(update, context, 'my_in_progress')
     elif text == '🚨 Срочные заявки':
         return show_requests_by_filter(update, context, 'urgent')
     elif text == '✅ Завершенные':
