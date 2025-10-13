@@ -39,7 +39,7 @@ ADMIN_CHAT_IDS = [5024165375]  # Замените на реальные chat_id 
 BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на реальный токен бота
 
 # Определяем этапы разговора
-NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY = range(7)
+NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD = range(9)
 
 # База данных
 DB_PATH = "requests.db"
@@ -77,6 +77,16 @@ plot_type_keyboard = [
     ['🔨 Участок штамповки', '📦 Другой участок'],
     ['🔙 Назад']
 ]
+
+# Клавиатуры для редактирования
+edit_choice_keyboard = [
+    ['📛 Редактировать имя', '📞 Редактировать телефон'],
+    ['📍 Редактировать участок', '🔧 Редактировать систему'],
+    ['📝 Редактировать описание', '⏰ Редактировать срочность'],
+    ['📷 Редактировать фото', '✅ Завершить редактирование']
+]
+
+edit_field_keyboard = [['🔙 Назад к редактированию']]
 
 # Админ-панель
 admin_panel_keyboard = [
@@ -856,10 +866,191 @@ def photo(update: Update, context: CallbackContext) -> int:
         )
         return PHOTO
 
-def show_request_summary(update: Update, context: CallbackContext) -> int:
-    """Показывает сводку заявки перед отправкой"""
-    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+# ==================== РЕДАКТИРОВАНИЕ ЗАЯВКИ ====================
+
+def edit_request_choice(update: Update, context: CallbackContext) -> int:
+    """Показывает меню выбора поля для редактирования"""
+    summary = context.user_data.get('summary', '')
     
+    update.message.reply_text(
+        f"{summary}\n\n"
+        "✏️ *Выберите поле для редактирования:*",
+        reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return EDIT_CHOICE
+
+def handle_edit_choice(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает выбор поля для редактирования"""
+    choice = update.message.text
+    context.user_data['editing_field'] = choice
+    
+    if choice == '📛 Редактировать имя':
+        update.message.reply_text(
+            "✏️ *Введите новое имя:*",
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📞 Редактировать телефон':
+        update.message.reply_text(
+            "✏️ *Введите новый телефон:*\n\nПример: +7 999 123-45-67",
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📍 Редактировать участок':
+        update.message.reply_text(
+            "✏️ *Выберите новый участок:*",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '🔧 Редактировать систему':
+        update.message.reply_text(
+            "✏️ *Выберите новую систему:*",
+            reply_markup=ReplyKeyboardMarkup(create_request_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📝 Редактировать описание':
+        update.message.reply_text(
+            "✏️ *Введите новое описание проблемы:*",
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '⏰ Редактировать срочность':
+        update.message.reply_text(
+            "✏️ *Выберите новую срочность:*",
+            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📷 Редактировать фото':
+        update.message.reply_text(
+            "✏️ *Отправьте новое фото или выберите действие:*",
+            reply_markup=ReplyKeyboardMarkup([
+                ['📷 Добавить новое фото', '🗑️ Удалить фото'],
+                ['🔙 Назад к редактированию']
+            ], resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '✅ Завершить редактирование':
+        return show_request_summary(update, context)
+    
+    else:
+        update.message.reply_text(
+            "❌ Пожалуйста, выберите поле для редактирования из меню.",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        return EDIT_CHOICE
+
+def handle_edit_field(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает ввод новых данных для поля"""
+    editing_field = context.user_data.get('editing_field')
+    text = update.message.text
+    
+    # Обработка кнопки "Назад"
+    if text == '🔙 Назад к редактированию':
+        return edit_request_choice(update, context)
+    
+    # Обработка фото
+    if update.message.photo:
+        context.user_data['photo'] = update.message.photo[-1].file_id
+        update.message.reply_text(
+            "✅ Фото обновлено!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        return edit_request_choice(update, context)
+    
+    # Обработка текстовых полей
+    if editing_field == '📛 Редактировать имя':
+        context.user_data['name'] = text
+        update.message.reply_text(
+            "✅ Имя обновлено!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '📞 Редактировать телефон':
+        context.user_data['phone'] = text
+        update.message.reply_text(
+            "✅ Телефон обновлен!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '📍 Редактировать участок':
+        if text in ['🔙 Назад', '🔙 Назад в меню']:
+            return edit_request_choice(update, context)
+        context.user_data['plot'] = text
+        update.message.reply_text(
+            "✅ Участок обновлен!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '🔧 Редактировать систему':
+        if text in ['🔙 Назад', '🔙 Назад в меню']:
+            return edit_request_choice(update, context)
+        context.user_data['system_type'] = text
+        update.message.reply_text(
+            "✅ Система обновлена!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '📝 Редактировать описание':
+        context.user_data['problem'] = text
+        update.message.reply_text(
+            "✅ Описание обновлено!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '⏰ Редактировать срочность':
+        if text == '🔙 Назад':
+            return edit_request_choice(update, context)
+        context.user_data['urgency'] = text
+        update.message.reply_text(
+            "✅ Срочность обновлена!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        
+    elif editing_field == '📷 Редактировать фото':
+        if text == '📷 Добавить новое фото':
+            update.message.reply_text(
+                "📸 Отправьте новое фото:",
+                reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        elif text == '🗑️ Удалить фото':
+            context.user_data['photo'] = None
+            update.message.reply_text(
+                "✅ Фото удалено!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Пожалуйста, выберите действие из меню.",
+                reply_markup=ReplyKeyboardMarkup([
+                    ['📷 Добавить новое фото', '🗑️ Удалить фото'],
+                    ['🔙 Назад к редактированию']
+                ], resize_keyboard=True)
+            )
+            return EDIT_FIELD
+    
+    # Обновляем сводку
+    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+    update_summary(context)
+    return edit_request_choice(update, context)
+
+def update_summary(context: CallbackContext) -> None:
+    """Обновляет сводку заявки в user_data"""
     photo_status = "✅ Есть" if context.user_data.get('photo') else "❌ Нет"
     
     summary = (
@@ -875,21 +1066,32 @@ def show_request_summary(update: Update, context: CallbackContext) -> int:
     )
     
     context.user_data['summary'] = summary
+
+def show_request_summary(update: Update, context: CallbackContext) -> int:
+    """Показывает сводку заявки перед отправкой"""
+    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+    update_summary(context)
     
-    if context.user_data.get('photo'):
-        update.message.reply_photo(
-            photo=context.user_data['photo'],
-            caption=f"{summary}\n\n*Подтвердите отправку заявки:*",
-            reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
-            parse_mode=ParseMode.MARKDOWN
-        )
+    # Определяем, откуда пришли - из создания или редактирования
+    if context.user_data.get('editing_mode'):
+        # Режим редактирования - показываем меню редактирования
+        return edit_request_choice(update, context)
     else:
-        update.message.reply_text(
-            f"{summary}\n\n*Подтвердите отправку заявки:*",
-            reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    return ConversationHandler.END
+        # Режим создания - показываем подтверждение
+        if context.user_data.get('photo'):
+            update.message.reply_photo(
+                photo=context.user_data['photo'],
+                caption=f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return ConversationHandler.END
 
 def confirm_request(update: Update, context: CallbackContext) -> None:
     """Подтверждает и отправляет заявку"""
@@ -943,12 +1145,9 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
         context.user_data.clear()
         
     elif update.message.text == '✏️ Редактировать заявку':
-        update.message.reply_text(
-            "✏️ *Редактирование заявки*\n\nУкажите ваше имя:",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return NAME
+        # Включаем режим редактирования
+        context.user_data['editing_mode'] = True
+        return edit_request_choice(update, context)
 
 def send_admin_notification(context: CallbackContext, user_data: Dict, request_id: int) -> None:
     """Отправляет уведомление администраторам о новой заявке"""
@@ -999,6 +1198,13 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
+def cancel_editing(update: Update, context: CallbackContext) -> int:
+    """Отменяет редактирование и возвращает к подтверждению"""
+    context.user_data.pop('editing_mode', None)
+    context.user_data.pop('editing_field', None)
+    
+    return show_request_summary(update, context)
+
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
 def main() -> None:
@@ -1027,10 +1233,16 @@ def main() -> None:
                     MessageHandler(Filters.text & ~Filters.command, photo),
                     MessageHandler(Filters.photo, photo)
                 ],
+                EDIT_CHOICE: [MessageHandler(Filters.text & ~Filters.command, handle_edit_choice)],
+                EDIT_FIELD: [
+                    MessageHandler(Filters.text & ~Filters.command, handle_edit_field),
+                    MessageHandler(Filters.photo, handle_edit_field)
+                ],
             },
             fallbacks=[
                 CommandHandler('cancel', cancel_request),
-                MessageHandler(Filters.regex('^(🔙 Назад в меню)$'), cancel_request)
+                MessageHandler(Filters.regex('^(🔙 Назад в меню)$'), cancel_request),
+                MessageHandler(Filters.regex('^(✅ Завершить редактирование)$'), show_request_summary)
             ],
             per_message=False
         )
