@@ -546,23 +546,30 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('assigned_admin'):
             request_text += f"\n👨‍💼 *Исполнитель:* {req['assigned_admin']}"
         
-        # Определяем кнопки в зависимости от типа фильтра
+        # ОБНОВЛЕННАЯ ЧАСТЬ: Определяем кнопки в зависимости от типа фильтра и статуса
+        keyboard = None
+        
         if filter_type == 'my_in_progress':
             # Для моих заявок в работе показываем кнопку "Выполнено"
             keyboard = [[
                 InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}"),
                 InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
             ]]
+        elif filter_type == 'in_progress':
+            # Для всех заявок в работе показываем кнопку "Подробнее"
+            keyboard = [[
+                InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
+            ]]
         elif req['status'] == 'new' and filter_type != 'completed':
+            # Новые заявки - кнопка "Взять в работу"
             keyboard = [[
                 InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}")
             ]]
         elif req['status'] == 'in_progress' and filter_type != 'completed':
+            # Заявки в работе - кнопка "Подробнее"
             keyboard = [[
                 InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
             ]]
-        else:
-            keyboard = None
         
         if req.get('photo'):
             if keyboard:
@@ -641,15 +648,22 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"👨‍💼 *Исполнитель:* {admin_name}"
         )
         
-        # Удаляем inline-клавиатуру
+        # Обновляем inline-клавиатуру - добавляем кнопку "Выполнено"
+        keyboard = [[
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
+            InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{request_id}")
+        ]]
+        
         if query.message.caption:
             query.edit_message_caption(
                 caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
             query.edit_message_text(
                 request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.MARKDOWN
             )
         
@@ -678,7 +692,9 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             
             request_text += f"🕒 *Создана:* {request['created_at'][:16]}\n"
             
-            # Определяем кнопки в зависимости от статуса заявки
+            # ОБНОВЛЕННАЯ ЧАСТЬ: Определяем кнопки в зависимости от статуса заявки
+            keyboard = None
+            
             if request['status'] == 'in_progress' and request.get('assigned_admin') == query.from_user.first_name:
                 # Если заявка в работе и текущий админ - исполнитель
                 keyboard = [[
@@ -686,11 +702,15 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                     InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
                 ]]
             elif request['status'] == 'in_progress':
+                # Если заявка в работе, но не текущий исполнитель
                 keyboard = [[
                     InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
                 ]]
-            else:
-                keyboard = None
+            elif request['status'] == 'new':
+                # Новая заявка
+                keyboard = [[
+                    InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{request_id}")
+                ]]
             
             # Редактируем существующее сообщение
             if query.message.caption:
@@ -747,7 +767,7 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"💬 *Комментарий:* Заявка выполнена"
         )
         
-        # Удаляем inline-клавиатуру
+        # Удаляем inline-клавиатуру после завершения
         if query.message.caption:
             query.edit_message_caption(
                 caption=request_text,
@@ -756,6 +776,30 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         else:
             query.edit_message_text(
                 request_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    elif data.startswith('contact_'):
+        request_id = int(data.split('_')[1])
+        request = db.get_request(request_id)
+        
+        if request:
+            contact_text = (
+                f"📞 *Контактная информация по заявке #{request_id}*\n\n"
+                f"👤 *Клиент:* {request['name']}\n"
+                f"📞 *Телефон:* `{request['phone']}`\n"
+                f"📍 *Участок:* {request['plot']}\n"
+                f"🔧 *Тип системы:* {request['system_type']}\n"
+                f"⏰ *Срочность:* {request['urgency']}\n\n"
+                f"_Для связи используйте указанный телефон_"
+            )
+            
+            query.answer("Контактная информация показана")
+            
+            # Отправляем отдельное сообщение с контактной информацией
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=contact_text,
                 parse_mode=ParseMode.MARKDOWN
             )
 
