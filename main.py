@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 ADMIN_CHAT_IDS = [5024165375]  # Замените на реальные chat_id админов
-BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на реальный токен бота
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Замените на реальный токен бота
 
 # Определяем этапы разговора
 NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY = range(7)
@@ -46,11 +46,9 @@ DB_PATH = "requests.db"
 
 # ==================== КЛАВИАТУРЫ ====================
 
-# Главное меню пользователя
-main_menu_keyboard = [
-    ['📝 Создать заявку', '📋 Мои заявки'],
-    ['ℹ️ О сервисе'],
-    ['👑 Админ-панель']  # Будет видно только админам
+# Главное меню пользователя (базовое)
+base_main_menu_keyboard = [
+    ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
 # Меню создания заявки
@@ -78,7 +76,6 @@ plot_type_keyboard = [
 # Админ-панель
 admin_main_keyboard = [
     ['📊 Статистика', '📋 Активные заявки'],
-    ['✅ Завершенные', '🚨 Срочные заявки'],
     ['🔙 Главное меню']
 ]
 
@@ -251,7 +248,7 @@ class Database:
             elif filter_type == 'in_progress':
                 status_filter = "status = 'in_progress'"
             elif filter_type == 'urgent':
-                status_filter = "urgency LIKE '%Срочно%'"
+                status_filter = "urgency LIKE '%Срочно%' AND status IN ('new', 'in_progress')"
             else:
                 status_filter = "status IN ('new', 'in_progress')"
             
@@ -322,13 +319,10 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
     user = update.message.from_user
     user_id = user.id
     
-    # Проверяем, является ли пользователь администратором
-    is_admin = user_id in ADMIN_CHAT_IDS
-    
     # Создаем клавиатуру в зависимости от прав
-    keyboard = main_menu_keyboard.copy()
-    if not is_admin:
-        keyboard = [row for row in keyboard if '👑 Админ-панель' not in row]
+    keyboard = base_main_menu_keyboard.copy()
+    if user_id in ADMIN_CHAT_IDS:
+        keyboard.append(['👑 Админ-панель'])
     
     welcome_text = (
         "🏭 *Добро пожаловать в сервис заявок для слаботочных систем завода Контакт!*\n\n"
@@ -346,48 +340,28 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
         parse_mode=ParseMode.MARKDOWN
     )
 
-def show_about(update: Update, context: CallbackContext) -> None:
-    """Показывает информацию о сервисе"""
-    about_text = (
-        "🏭 *О сервисе завода Контакт*\n\n"
-        "Мы специализируемся на обслуживании слаботочных систем промышленного оборудования.\n\n"
-        "✅ *Наши услуги:*\n"
-        "• Монтаж и настройка систем видеонаблюдения\n"
-        "• Установка СКУД и систем контроля доступа\n"
-        "• Прокладка и обслуживание компьютерных сетей\n"
-        "• Монтаж пожарных сигнализаций\n"
-        "• Ремонт и диагностика оборудования\n\n"
-        "🕒 *Режим работы:*\n"
-        "• Пн-Пт: 9:00 - 18:00\n"
-        "• Обед: 12:00 - 13:00\n"
-        "• Сб-Вс: Выходной\n\n"
-        "📍 *Зона обслуживания:*\n"
-        "Все производственные участки завода Контакт"
-    )
-    
-    update.message.reply_text(
-        about_text,
-        reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
 def show_my_requests(update: Update, context: CallbackContext) -> None:
     """Показывает заявки пользователя"""
     user_id = update.message.from_user.id
     requests = db.get_user_requests(user_id)
     
+    # Создаем клавиатуру в зависимости от прав
+    keyboard = base_main_menu_keyboard.copy()
+    if user_id in ADMIN_CHAT_IDS:
+        keyboard.append(['👑 Админ-панель'])
+    
     if not requests:
         update.message.reply_text(
             "📭 У вас пока нет созданных заявок.\n\n"
             "Хотите создать первую заявку?",
-            reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return
     
     update.message.reply_text(
         f"📋 *Ваши последние заявки ({len(requests)}):*",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     
     for req in requests:
@@ -419,7 +393,7 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
     
     if user_id not in ADMIN_CHAT_IDS:
         update.message.reply_text("❌ У вас нет доступа к админ-панели.")
-        return
+        return show_main_menu(update, context)
     
     stats = db.get_statistics('today')
     admin_text = (
@@ -442,7 +416,7 @@ def show_admin_statistics(update: Update, context: CallbackContext) -> None:
     """Показывает статистику для администратора"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     update.message.reply_text(
         "📊 *Статистика системы*\n\n"
@@ -455,7 +429,7 @@ def show_statistics_period(update: Update, context: CallbackContext, period: str
     """Показывает статистику за указанный период"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     stats = db.get_statistics(period)
     
@@ -487,7 +461,7 @@ def show_admin_requests(update: Update, context: CallbackContext) -> None:
     """Показывает управление заявками для администратора"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     update.message.reply_text(
         "📋 *Управление заявками*\n\n"
@@ -500,7 +474,7 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     """Показывает заявки по фильтру"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     requests = db.get_active_requests(filter_type)
     
@@ -540,10 +514,15 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('assigned_admin'):
             request_text += f"\n👨‍💼 *Исполнитель:* {req['assigned_admin']}"
         
-        keyboard = [[
-            InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}"),
-            InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
-        ]]
+        # Для новых заявок показываем кнопку "Взять в работу", для остальных - "Подробнее"
+        if req['status'] == 'new':
+            keyboard = [[
+                InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}")
+            ]]
+        else:
+            keyboard = [[
+                InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{req['id']}")
+            ]]
         
         if req.get('photo'):
             update.message.reply_photo(
@@ -596,7 +575,23 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             except Exception as e:
                 logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
         
-        query.edit_message_text(f"✅ Заявка #{request_id} взята вами в работу")
+        # Обновляем сообщение с заявкой
+        request_text = (
+            f"✅ *Заявка #{request_id} взята вами в работу!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem'][:100]}...\n\n"
+            f"🔄 *Статус:* В работе\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}"
+        )
+        
+        query.edit_message_caption(
+            caption=request_text if query.message.caption else request_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
         
     elif data.startswith('view_'):
         request_id = int(data.split('_')[1])
@@ -628,15 +623,15 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 InlineKeyboardButton("📞 Связаться", callback_data=f"contact_{request_id}")
             ]]
             
-            if request.get('photo'):
-                query.message.reply_photo(
-                    photo=request['photo'],
+            # Редактируем существующее сообщение
+            if query.message.caption:
+                query.edit_message_caption(
                     caption=request_text,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
-                query.message.reply_text(
+                query.edit_message_text(
                     request_text,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode=ParseMode.MARKDOWN
@@ -649,18 +644,21 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
     text = update.message.text
     user_id = update.message.from_user.id
     
+    # Создаем клавиатуру в зависимости от прав
+    keyboard = base_main_menu_keyboard.copy()
+    if user_id in ADMIN_CHAT_IDS:
+        keyboard.append(['👑 Админ-панель'])
+    
     if text == '📝 Создать заявку':
         return start_request_creation(update, context)
     elif text == '📋 Мои заявки':
         return show_my_requests(update, context)
-    elif text == 'ℹ️ О сервисе':
-        return show_about(update, context)
     elif text == '👑 Админ-панель' and user_id in ADMIN_CHAT_IDS:
         return show_admin_panel(update, context)
     else:
         update.message.reply_text(
             "Пожалуйста, выберите действие из меню:",
-            reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
 
 def handle_admin_menu(update: Update, context: CallbackContext) -> None:
@@ -675,10 +673,6 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
         return show_admin_statistics(update, context)
     elif text == '📋 Активные заявки':
         return show_admin_requests(update, context)
-    elif text == '✅ Завершенные':
-        return show_requests_by_filter(update, context, 'completed')
-    elif text == '🚨 Срочные заявки':
-        return show_requests_by_filter(update, context, 'urgent')
     elif text == '🔙 Главное меню':
         return show_main_menu(update, context)
     elif text == '🔙 Админ-панель':
@@ -690,7 +684,7 @@ def handle_stats_menu(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     if text == '📈 За сегодня':
         return show_statistics_period(update, context, 'today')
@@ -709,7 +703,7 @@ def handle_requests_menu(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
-        return
+        return show_main_menu(update, context)
     
     if text == '🆕 Новые заявки':
         return show_requests_by_filter(update, context, 'new')
@@ -905,9 +899,14 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
                 f"_Спасибо за обращение в службу слаботочных систем завода Контакт!_ 🛠️"
             )
             
+            # Создаем клавиатуру в зависимости от прав
+            keyboard = base_main_menu_keyboard.copy()
+            if user.id in ADMIN_CHAT_IDS:
+                keyboard.append(['👑 Админ-панель'])
+            
             update.message.reply_text(
                 confirmation_text,
-                reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True),
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
                 parse_mode=ParseMode.MARKDOWN
             )
             
@@ -915,9 +914,15 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
             
         except Exception as e:
             logger.error(f"Ошибка при сохранении заявки: {e}")
+            
+            # Создаем клавиатуру в зависимости от прав
+            keyboard = base_main_menu_keyboard.copy()
+            if user.id in ADMIN_CHAT_IDS:
+                keyboard.append(['👑 Админ-панель'])
+            
             update.message.reply_text(
                 "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
-                reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True),
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
                 parse_mode=ParseMode.MARKDOWN
             )
         
@@ -966,9 +971,15 @@ def send_admin_notification(context: CallbackContext, user_data: Dict, request_i
 
 def cancel_request(update: Update, context: CallbackContext) -> int:
     """Отменяет создание заявки"""
+    # Создаем клавиатуру в зависимости от прав
+    user_id = update.message.from_user.id
+    keyboard = base_main_menu_keyboard.copy()
+    if user_id in ADMIN_CHAT_IDS:
+        keyboard.append(['👑 Админ-панель'])
+    
     update.message.reply_text(
         "❌ Создание заявки отменено.",
-        reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -1018,8 +1029,8 @@ def main() -> None:
         dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку|✏️ Редактировать заявку)$'), confirm_request))
         
         # Обработчики меню
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📝 Создать заявку|📋 Мои заявки|ℹ️ О сервисе|👑 Админ-панель)$'), handle_main_menu))
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📊 Статистика|📋 Активные заявки|✅ Завершенные|🚨 Срочные заявки|🔙 Главное меню|🔙 Админ-панель)$'), handle_admin_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📝 Создать заявку|📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📊 Статистика|📋 Активные заявки|🔙 Главное меню|🔙 Админ-панель)$'), handle_admin_menu))
         dispatcher.add_handler(MessageHandler(Filters.regex('^(📈 За сегодня|📅 За неделю|📆 За месяц|🗓️ За все время)$'), handle_stats_menu))
         dispatcher.add_handler(MessageHandler(Filters.regex('^(🆕 Новые заявки|🔄 В работе|📤 Все активные)$'), handle_requests_menu))
         
