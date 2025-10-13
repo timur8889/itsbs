@@ -88,6 +88,20 @@ edit_choice_keyboard = [
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
 
+# Админ-панель
+admin_panel_keyboard = [
+    ['📊 Статистика', '📋 Активные заявки'],
+    ['🆕 Новые заявки', '🔄 В работе'],
+    ['🚨 Срочные заявки', '✅ Завершенные'],
+    ['🔙 Главное меню']
+]
+
+admin_stats_keyboard = [
+    ['📈 За сегодня', '📅 За неделю'],
+    ['📆 За месяц', '🗓️ За все время'],
+    ['🔙 Админ-панель']
+]
+
 # ==================== БАЗА ДАННЫХ ====================
 
 class Database:
@@ -427,19 +441,12 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         f"• В работе: {stats['in_progress']}\n"
         f"• Завершено: {stats['completed']}\n"
         f"• Срочных: {stats['urgent']}\n\n"
-        "*Доступные команды:*\n"
-        "• `/stats` - Показать статистику\n"
-        "• `/new` - Новые заявки\n"
-        "• `/active` - Активные заявки\n"
-        "• `/my_work` - Мои заявки в работе\n"
-        "• `/urgent` - Срочные заявки\n"
-        "• `/completed` - Завершенные заявки\n"
-        "• `/menu` - Главное меню"
+        "Выберите раздел для управления:"
     )
     
     update.message.reply_text(
         admin_text,
-        reply_markup=ReplyKeyboardMarkup(admin_main_menu_keyboard, resize_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -449,41 +456,42 @@ def show_admin_statistics(update: Update, context: CallbackContext) -> None:
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    stats_today = db.get_statistics('today')
-    stats_week = db.get_statistics('week')
-    stats_month = db.get_statistics('month')
-    stats_all = db.get_statistics('all')
+    update.message.reply_text(
+        "📊 *Статистика системы*\n\n"
+        "Выберите период для просмотра статистики:",
+        reply_markup=ReplyKeyboardMarkup(admin_stats_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def show_statistics_period(update: Update, context: CallbackContext, period: str) -> None:
+    """Показывает статистику за указанный период"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    stats = db.get_statistics(period)
+    
+    period_names = {
+        'today': 'сегодня',
+        'week': 'за неделю',
+        'month': 'за месяц',
+        'all': 'за все время'
+    }
     
     stats_text = (
-        "📊 *Статистика системы*\n\n"
-        
-        "📈 *Сегодня:*\n"
-        f"• Всего заявок: {stats_today['total_requests']}\n"
-        f"• Новые: {stats_today['new']}\n"
-        f"• В работе: {stats_today['in_progress']}\n"
-        f"• Завершено: {stats_today['completed']}\n"
-        f"• Срочных: {stats_today['urgent']}\n\n"
-        
-        "📅 *За неделю:*\n"
-        f"• Всего заявок: {stats_week['total_requests']}\n"
-        f"• Завершено: {stats_week['completed']}\n"
-        f"• Эффективность: {round(stats_week['completed'] / max(stats_week['total_requests'], 1) * 100, 1)}%\n\n"
-        
-        "📆 *За месяц:*\n"
-        f"• Всего заявок: {stats_month['total_requests']}\n"
-        f"• Завершено: {stats_month['completed']}\n"
-        f"• Эффективность: {round(stats_month['completed'] / max(stats_month['total_requests'], 1) * 100, 1)}%\n\n"
-        
-        "🗓️ *За все время:*\n"
-        f"• Пользователей: {stats_all['total_users']}\n"
-        f"• Всего заявок: {stats_all['total_requests']}\n"
-        f"• Завершено: {stats_all['completed']}\n"
-        f"• Эффективность: {round(stats_all['completed'] / max(stats_all['total_requests'], 1) * 100, 1)}%"
+        f"📊 *Статистика {period_names[period]}*\n\n"
+        f"👥 *Пользователи:* {stats['total_users']}\n"
+        f"📋 *Всего заявок:* {stats['total_requests']}\n"
+        f"🆕 *Новые:* {stats['new']}\n"
+        f"🔄 *В работе:* {stats['in_progress']}\n"
+        f"✅ *Завершено:* {stats['completed']}\n"
+        f"🚨 *Срочных:* {stats['urgent']}\n\n"
+        f"📈 *Эффективность:* {round(stats['completed'] / max(stats['total_requests'], 1) * 100, 1)}%"
     )
     
     update.message.reply_text(
         stats_text,
-        reply_markup=ReplyKeyboardMarkup(admin_main_menu_keyboard, resize_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(admin_stats_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -512,13 +520,13 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     if not requests:
         update.message.reply_text(
             f"📭 {filter_name} отсутствуют.",
-            reply_markup=ReplyKeyboardMarkup(admin_main_menu_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
         )
         return
     
     update.message.reply_text(
         filter_name,
-        reply_markup=ReplyKeyboardMarkup(admin_main_menu_keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
     )
     
     for req in requests:
@@ -751,32 +759,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
 
-# ==================== КОМАНДЫ АДМИНИСТРАТОРА ====================
-
-def admin_stats(update: Update, context: CallbackContext) -> None:
-    """Показывает статистику"""
-    return show_admin_statistics(update, context)
-
-def admin_new(update: Update, context: CallbackContext) -> None:
-    """Показывает новые заявки"""
-    return show_requests_by_filter(update, context, 'new')
-
-def admin_active(update: Update, context: CallbackContext) -> None:
-    """Показывает активные заявки"""
-    return show_requests_by_filter(update, context, 'all')
-
-def admin_my_work(update: Update, context: CallbackContext) -> None:
-    """Показывает заявки в работе текущего администратора"""
-    return show_requests_by_filter(update, context, 'my_in_progress')
-
-def admin_urgent(update: Update, context: CallbackContext) -> None:
-    """Показывает срочные заявки"""
-    return show_requests_by_filter(update, context, 'urgent')
-
-def admin_completed(update: Update, context: CallbackContext) -> None:
-    """Показывает завершенные заявки"""
-    return show_requests_by_filter(update, context, 'completed')
-
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 
 def handle_main_menu(update: Update, context: CallbackContext) -> None:
@@ -801,6 +783,51 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
             "Пожалуйста, выберите действие из меню:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
+
+def handle_admin_menu(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает выбор в админ-меню"""
+    text = update.message.text
+    user_id = update.message.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    if text == '📊 Статистика':
+        return show_admin_statistics(update, context)
+    elif text == '📋 Активные заявки':
+        return show_requests_by_filter(update, context, 'all')
+    elif text == '🆕 Новые заявки':
+        return show_requests_by_filter(update, context, 'new')
+    elif text == '🔄 В работе':
+        # Показываем заявки, которые взял в работу текущий администратор
+        return show_requests_by_filter(update, context, 'my_in_progress')
+    elif text == '🚨 Срочные заявки':
+        return show_requests_by_filter(update, context, 'urgent')
+    elif text == '✅ Завершенные':
+        return show_requests_by_filter(update, context, 'completed')
+    elif text == '🔙 Главное меню':
+        return show_main_menu(update, context)
+    elif text == '🔙 Админ-панель':
+        return show_admin_panel(update, context)
+
+def handle_stats_menu(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает выбор в меню статистики"""
+    text = update.message.text
+    user_id = update.message.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    if text == '📈 За сегодня':
+        return show_statistics_period(update, context, 'today')
+    elif text == '📅 За неделю':
+        return show_statistics_period(update, context, 'week')
+    elif text == '📆 За месяц':
+        return show_statistics_period(update, context, 'month')
+    elif text == '🗓️ За все время':
+        return show_statistics_period(update, context, 'all')
+    elif text == '🔙 Админ-панель':
+        return show_admin_panel(update, context)
 
 # ==================== СОЗДАНИЕ ЗАЯВКИ ====================
 
@@ -1324,20 +1351,24 @@ def main() -> None:
         dispatcher.add_handler(CommandHandler('menu', show_main_menu))
         dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
         
-        # Команды администратора
-        dispatcher.add_handler(CommandHandler('stats', admin_stats))
-        dispatcher.add_handler(CommandHandler('new', admin_new))
-        dispatcher.add_handler(CommandHandler('active', admin_active))
-        dispatcher.add_handler(CommandHandler('my_work', admin_my_work))
-        dispatcher.add_handler(CommandHandler('urgent', admin_urgent))
-        dispatcher.add_handler(CommandHandler('completed', admin_completed))
-        
         dispatcher.add_handler(conv_handler)
         dispatcher.add_handler(edit_handler)
         dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         
         # Обработчики главного меню
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📝 Создать заявку|📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
+        
+        # Обработчики админ-панели
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📊 Статистика|📋 Активные заявки|🆕 Новые заявки|🔄 В работе|🚨 Срочные заявки|✅ Завершенные|🔙 Главное меню|🔙 Админ-панель)$'), 
+            handle_admin_menu
+        ))
+        
+        # Обработчики статистики
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📈 За сегодня|📅 За неделю|📆 За месяц|🗓️ За все время)$'), 
+            handle_stats_menu
+        ))
         
         # Обработчики callback для админ-панели
         dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|view_|complete_|contact_)'))
