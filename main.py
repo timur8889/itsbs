@@ -1217,7 +1217,7 @@ def main() -> None:
         updater = Updater(BOT_TOKEN)
         dispatcher = updater.dispatcher
 
-        # Обработчик создания заявки
+        # Обработчик создания заявки (включая редактирование)
         conv_handler = ConversationHandler(
             entry_points=[
                 MessageHandler(Filters.regex('^(📝 Создать заявку)$'), start_request_creation),
@@ -1244,7 +1244,13 @@ def main() -> None:
                 MessageHandler(Filters.regex('^(🔙 Назад в меню)$'), cancel_request),
                 MessageHandler(Filters.regex('^(✅ Завершить редактирование)$'), show_request_summary)
             ],
-            per_message=False
+            allow_reentry=True
+        )
+
+        # Отдельный обработчик для кнопки редактирования заявки
+        edit_handler = MessageHandler(
+            Filters.regex('^(✏️ Редактировать заявку)$'), 
+            confirm_request
         )
 
         # Регистрируем обработчики
@@ -1253,16 +1259,23 @@ def main() -> None:
         dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
         
         dispatcher.add_handler(conv_handler)
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку|✏️ Редактировать заявку)$'), confirm_request))
+        dispatcher.add_handler(edit_handler)
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         
         # Обработчики главного меню
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📝 Создать заявку|📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
         
         # Обработчики админ-панели
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📊 Статистика|📋 Активные заявки|🆕 Новые заявки|🔄 В работе|🚨 Срочные заявки|✅ Завершенные|🔙 Главное меню|🔙 Админ-панель)$'), handle_admin_menu))
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📊 Статистика|📋 Активные заявки|🆕 Новые заявки|🔄 В работе|🚨 Срочные заявки|✅ Завершенные|🔙 Главное меню|🔙 Админ-панель)$'), 
+            handle_admin_menu
+        ))
         
         # Обработчики статистики
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📈 За сегодня|📅 За неделю|📆 За месяц|🗓️ За все время)$'), handle_stats_menu))
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📈 За сегодня|📅 За неделю|📆 За месяц|🗓️ За все время)$'), 
+            handle_stats_menu
+        ))
         
         # Обработчики callback для админ-панели
         dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|view_|complete_|contact_)'))
