@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 ADMIN_CHAT_IDS = [5024165375]  # Замените на реальные chat_id админов
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Замените на реальный токен бота
+BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на реальный токен бота
 
 # Определяем этапы разговора
 NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY = range(7)
