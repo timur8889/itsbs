@@ -795,20 +795,26 @@ class EnhancedDatabase(Database):
             logger.error(f"Ошибка получения статистики пользователя: {e}")
             return {}
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ВСЕХ СИСТЕМ ====================
+nager(
+     # ==================== ИНИЦИАЛИЗАЦИЯ ВСЕХ СИСТЕМ ====================
 
 def initialize_all_systems():
     """Инициализирует все системы бота"""
-    global (db, sheets_manager, notification_manager, analytics_engine, 
-           ai_assistant, security_manager, performance_monitor, template_manager,
-           i18n, gamification_engine, web_dashboard)
+    # Объявляем глобальные переменные
+    global db, sheets_manager, notification_manager, analytics_engine
+    global ai_assistant, security_manager, performance_monitor, template_manager
+    global i18n, gamification_engine, web_dashboard
     
     # Основные системы
-    sheets_manager = GoogleSheetsManager(
-        config.google_sheets_credentials,
-        config.google_sheet_id,
-        config.google_sheet_name
-    ) if config.sync_to_sheets else None
+    if config.sync_to_sheets:
+        sheets_manager = GoogleSheetsManager(
+            config.google_sheets_credentials,
+            config.google_sheet_id,
+            config.google_sheet_name
+        )
+    else:
+        sheets_manager = None
+        logger.info("⚠️ Google Sheets отключен в конфигурации")
     
     db = EnhancedDatabase(DB_PATH, sheets_manager)
     security_manager = SecurityManager()
@@ -821,11 +827,27 @@ def initialize_all_systems():
     i18n = Internationalization()
     gamification_engine = GamificationEngine(DB_PATH)
     
-    # Веб-панель
+    # Веб-панель (запускается в отдельном потоке)
     web_dashboard = WebDashboard(db, config.web_dashboard_port)
     web_dashboard.run()
     
     logger.info("✅ Все системы инициализированы!")
+
+# ==================== ЗАПУСК СИСТЕМ ====================
+
+# Глобальные объекты (инициализируются здесь, обновляются в initialize_all_systems)
+rate_limiter = RateLimiter()
+db = None
+sheets_manager = None
+notification_manager = None
+analytics_engine = None
+ai_assistant = None
+security_manager = None
+performance_monitor = None
+template_manager = None
+i18n = None
+gamification_engine = None
+web_dashboard = None
 
 # ==================== НОВЫЕ КОМАНДЫ И ФУНКЦИИ ====================
 
