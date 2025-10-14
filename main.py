@@ -796,14 +796,21 @@ class EnhancedDatabase(Database):
             return {}
 
 nager(
-     # ==================== ИНИЦИАЛИЗАЦИЯ ВСЕХ СИСТЕМ ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ ВСЕХ СИСТЕМ ====================
 
 def initialize_all_systems():
     """Инициализирует все системы бота"""
-    # Объявляем глобальные переменные
-    global db, sheets_manager, notification_manager, analytics_engine
-    global ai_assistant, security_manager, performance_monitor, template_manager
-    global i18n, gamification_engine, web_dashboard
+    global db
+    global sheets_manager
+    global notification_manager
+    global analytics_engine
+    global ai_assistant
+    global security_manager
+    global performance_monitor
+    global template_manager
+    global i18n
+    global gamification_engine
+    global web_dashboard
     
     # Основные системы
     if config.sync_to_sheets:
@@ -827,7 +834,7 @@ def initialize_all_systems():
     i18n = Internationalization()
     gamification_engine = GamificationEngine(DB_PATH)
     
-    # Веб-панель (запускается в отдельном потоке)
+    # Веб-панель
     web_dashboard = WebDashboard(db, config.web_dashboard_port)
     web_dashboard.run()
     
