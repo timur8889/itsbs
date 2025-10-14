@@ -1002,11 +1002,10 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('admin_comment'):
             request_text += f"\n💬 *Комментарий администратора:* {req['admin_comment']}"
         
-        # Определяем кнопки в зависимости от статуса заявки
+        # Определяем кнопки в зависимости от статуса заявки (УДАЛЕНЫ КНОПКИ "ПОЗВОНИТЬ")
         if req['status'] == 'completed':
-            # Для выполненных заявок - только кнопки связи
+            # Для выполненных заявок - только кнопка "Написать"
             keyboard = [[
-                InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}"),
                 InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
             ]]
         elif req['status'] == 'in_progress':
@@ -1015,24 +1014,17 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
                 # Если текущий администратор - исполнитель
                 keyboard = [[
                     InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}"),
-                    InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}")
-                ],
-                [
                     InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
                 ]]
             else:
                 # Если заявка в работе у другого администратора
                 keyboard = [[
-                    InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}"),
                     InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
                 ]]
         else:
             # Для новых заявок
             keyboard = [[
                 InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}"),
-                InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}")
-            ],
-            [
                 InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
             ]]
         
@@ -1101,12 +1093,9 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"👨‍💼 *Исполнитель:* {admin_name}"
         )
         
-        # Обновляем inline-клавиатуру - добавляем кнопку "Выполнено"
+        # Обновляем inline-клавиатуру - добавляем кнопку "Выполнено" (БЕЗ КНОПКИ "ПОЗВОНИТЬ")
         keyboard = [[
             InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
-            InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{request_id}")
-        ],
-        [
             InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
         ]]
         
@@ -1166,9 +1155,8 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"🕒 *Завершена:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         
-        # Обновляем inline-клавиатуру для выполненных заявок
+        # Обновляем inline-клавиатуру для выполненных заявок (БЕЗ КНОПКИ "ПОЗВОНИТЬ")
         keyboard = [[
-            InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{request_id}"),
             InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
         ]]
         
@@ -1188,84 +1176,7 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         # Отправляем подтверждение администратору
         query.answer("✅ Заявка выполнена!")
     
-    elif data.startswith('call_'):
-        request_id = int(data.split('_')[1])
-        request = db.get_request(request_id)
-        
-        if request:
-            # Очищаем номер телефона от всех символов кроме цифр
-            phone_number = request['phone']
-            # Убираем все нецифровые символы, кроме плюса в начале
-            clean_number = ''.join(c for c in phone_number if c.isdigit() or c == '+')
-            
-            # Если номер начинается с +7, оставляем как есть, иначе добавляем +7
-            if clean_number.startswith('+'):
-                call_number = clean_number
-            elif clean_number.startswith('7') and len(clean_number) == 11:
-                call_number = '+' + clean_number
-            elif clean_number.startswith('8') and len(clean_number) == 11:
-                call_number = '+7' + clean_number[1:]
-            else:
-                call_number = '+7' + clean_number
-            
-            # Создаем кнопку для звонка с tel: ссылкой
-            call_button = InlineKeyboardButton(
-                "📞 Позвонить сейчас", 
-                url=f"tel:{call_number}"
-            )
-            
-            # Создаем кнопку для копирования номера
-            copy_button = InlineKeyboardButton(
-                "📋 Скопировать номер", 
-                callback_data=f"copy_{request_id}"
-            )
-            
-            contact_text = (
-                f"📞 *Контактная информация по заявке #{request_id}*\n\n"
-                f"👤 *Клиент:* {request['name']}\n"
-                f"📞 *Телефон:* `{request['phone']}`\n"
-                f"📍 *Участок:* {request['plot']}\n"
-                f"🔧 *Тип системы:* {request['system_type']}\n"
-                f"⏰ *Срочность:* {request['urgency']}\n\n"
-                f"_Нажмите кнопку '📞 Позвонить сейчас' для автоматического набора номера._\n"
-                f"_На мобильных устройствах откроется приложение телефона._"
-            )
-            
-            query.answer("📞 Открывается набор номера...")
-            
-            # Отправляем отдельное сообщение с кнопками для связи
-            context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=contact_text,
-                reply_markup=InlineKeyboardMarkup([
-                    [call_button],
-                    [copy_button]
-                ]),
-                parse_mode=ParseMode.MARKDOWN
-            )
-    
-    elif data.startswith('copy_'):
-        request_id = int(data.split('_')[1])
-        request = db.get_request(request_id)
-        
-        if request:
-            # Просто показываем номер крупным текстом для удобного копирования
-            contact_text = (
-                f"📋 *Номер телефона для копирования*\n\n"
-                f"👤 *Клиент:* {request['name']}\n"
-                f"📞 *Телефон:* \n\n"
-                f"`{request['phone']}`\n\n"
-                f"_Нажмите на номер выше, чтобы скопировать его_"
-            )
-            
-            query.answer("📋 Номер готов для копирования")
-            
-            # Отправляем сообщение с номером для копирования
-            context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=contact_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
+    # УДАЛЕНЫ БЛОКИ ОБРАБОТКИ call_ и copy_ ТАК КАК КНОПКИ "ПОЗВОНИТЬ" УДАЛЕНЫ
     
     elif data.startswith('message_'):
         request_id = int(data.split('_')[1])
@@ -1407,8 +1318,8 @@ def main() -> None:
             handle_admin_menu
         ))
         
-        # Обработчики callback для админ-панели
-        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|call_|message_|copy_)'))
+        # Обработчики callback для админ-панели (УДАЛЕНЫ call_ и copy_)
+        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message_)'))
 
         # Запускаем бота
         logger.info("🤖 Бот запущен с визуальным меню!")
