@@ -84,7 +84,225 @@ DB_PATH = "requests.db"
 BACKUP_DIR = "backups"
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# ==================== БАЗОВЫЕ КЛАССЫ (ДОБАВЛЕНО ДЛЯ СОВМЕСТИМОСТИ) ====================
+# ==================== КЛАСС ДЛЯ GOOGLE SHEETS ====================
+
+class GoogleSheetsManager:
+    """Менеджер для работы с Google Sheets"""
+    
+    def __init__(self, credentials_json: str, sheet_id: str, sheet_name: str = 'Заявки'):
+        self.credentials_json = credentials_json
+        self.sheet_id = sheet_id
+        self.sheet_name = sheet_name
+        self.client = None
+        self.sheet = None
+        self.is_connected = False
+        self._connect()
+    
+    def _connect(self):
+        """Подключение к Google Sheets"""
+        try:
+            if not self.credentials_json or not self.sheet_id:
+                logger.warning("⚠️ Google Sheets не настроен: отсутствуют credentials или sheet_id")
+                return
+            
+            if not GOOGLE_SHEETS_AVAILABLE:
+                logger.warning("⚠️ Библиотеки Google Sheets не установлены")
+                return
+            
+            # Парсим JSON credentials из переменной окружения
+            creds_dict = json.loads(self.credentials_json)
+            
+            # Указываем правильные scope
+            SCOPES = [
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive'
+            ]
+            
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+            
+            self.client = gspread.authorize(creds)
+            self.sheet = self.client.open_by_key(self.sheet_id).worksheet(self.sheet_name)
+            self.is_connected = True
+            logger.info("✅ Успешное подключение к Google Sheets")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON credentials: {e}")
+            self.is_connected = False
+        except gspread.exceptions.APIError as e:
+            logger.error(f"❌ Ошибка API Google Sheets: {e}")
+            self.is_connected = False
+        except gspread.exceptions.SpreadsheetNotFound:
+            logger.error(f"❌ Таблица с ID {self.sheet_id} не найдена")
+            self.is_connected = False
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+            self.is_connected = False
+    
+    def _ensure_headers(self):
+        """Создает заголовки таблицы если их нет"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            # Пытаемся прочитать данные
+            try:
+                current_data = self.sheet.get_all_records()
+            except gspread.exceptions.APIError:
+                current_data = []
+            
+            if not current_data:
+                headers = [
+                    'ID', 'Статус', 'Имя', 'Телефон', 'Участок', 'Тип системы',
+                    'Проблема', 'Срочность', 'Фото', 'ID пользователя', 
+                    'Username', 'Создано', 'Обновлено', 'Исполнитель', 'Завершено'
+                ]
+                self.sheet.append_row(headers)
+                logger.info("✅ Заголовки таблицы созданы")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания заголовков: {e}")
+            return False
+    
+    def add_request(self, request_data: Dict) -> bool:
+        """Добавляет заявку в таблицу"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            if not self._ensure_headers():
+                return False
+            
+            row_data = [
+                request_data.get('id', ''),
+                request_data.get('status', 'new'),
+                request_data.get('name', ''),
+                request_data.get('phone', ''),
+                request_data.get('plot', ''),
+                request_data.get('system_type', ''),
+                request_data.get('problem', ''),
+                request_data.get('urgency', ''),
+                '✅' if request_data.get('photo') else '❌',
+                request_data.get('user_id', ''),
+                request_data.get('username', ''),
+                request_data.get('created_at', ''),
+                request_data.get('updated_at', ''),
+                request_data.get('assigned_to', ''),
+                request_data.get('completed_at', '')
+            ]
+            
+            self.sheet.append_row(row_data)
+            logger.info(f"✅ Заявка #{request_data.get('id')} добавлена в Google Sheets")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления заявки в Google Sheets: {e}")
+            return False
+    
+    def update_request(self, request_id: int, updates: Dict) -> bool:
+        """Обновляет заявку в таблице"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            # Находим строку с заявкой
+            records = self.sheet.get_all_records()
+            for i, record in enumerate(records, start=2):  # start=2 т.к. первая строка - заголовки
+                if record.get('ID') == request_id:
+                    # Обновляем поля
+                    for key, value in updates.items():
+                        column_map = {
+                            'status': 'Статус',
+                            'assigned_to': 'Исполнитель', 
+                            'completed_at': 'Завершено',
+                            'updated_at': 'Обновлено'
+                        }
+                        if key in column_map:
+                            col_name = column_map[key]
+                            col_index = list(records[0].keys()).index(col_name) + 1
+                            self.sheet.update_cell(i, col_index, value)
+                    
+                    logger.info(f"✅ Заявка #{request_id} обновлена в Google Sheets")
+                    return True
+            
+            logger.warning(f"⚠️ Заявка #{request_id} не найдена в Google Sheets для обновления")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления заявки в Google Sheets: {e}")
+            return False
+    
+    def get_all_requests(self) -> List[Dict]:
+        """Получает все заявки из таблицы"""
+        if not self.is_connected:
+            return []
+        
+        try:
+            return self.sheet.get_all_records()
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения данных из Google Sheets: {e}")
+            return []
+    
+    def sync_from_sheets(self, db_manager) -> Tuple[int, int]:
+        """Синхронизация из Google Sheets в базу данных"""
+        if not self.is_connected:
+            return 0, 0
+        
+        try:
+            sheet_requests = self.get_all_requests()
+            if not sheet_requests:
+                return 0, 0
+            
+            updated = 0
+            added = 0
+            
+            for sheet_req in sheet_requests:
+                if not sheet_req.get('ID'):
+                    continue
+                
+                # Проверяем существование заявки в базе
+                existing = db_manager.get_request_by_id(sheet_req['ID'])
+                
+                if existing:
+                    # Обновляем существующую
+                    updates = {}
+                    if sheet_req.get('Статус') and sheet_req['Статус'] != existing.get('status'):
+                        updates['status'] = sheet_req['Статус']
+                    if sheet_req.get('Исполнитель') and sheet_req['Исполнитель'] != existing.get('assigned_to'):
+                        updates['assigned_to'] = sheet_req['Исполнитель']
+                    
+                    if updates:
+                        db_manager.update_request(sheet_req['ID'], updates)
+                        updated += 1
+                else:
+                    # Добавляем новую заявку
+                    request_data = {
+                        'id': sheet_req['ID'],
+                        'status': sheet_req.get('Статус', 'new'),
+                        'name': sheet_req.get('Имя', ''),
+                        'phone': sheet_req.get('Телефон', ''),
+                        'plot': sheet_req.get('Участок', ''),
+                        'system_type': sheet_req.get('Тип системы', ''),
+                        'problem': sheet_req.get('Проблема', ''),
+                        'urgency': sheet_req.get('Срочность', ''),
+                        'user_id': sheet_req.get('ID пользователя', ''),
+                        'username': sheet_req.get('Username', ''),
+                        'created_at': sheet_req.get('Создано', ''),
+                        'updated_at': sheet_req.get('Обновлено', ''),
+                        'assigned_to': sheet_req.get('Исполнитель', ''),
+                        'completed_at': sheet_req.get('Завершено', '')
+                    }
+                    
+                    if db_manager.save_external_request(request_data):
+                        added += 1
+            
+            logger.info(f"✅ Синхронизация из Google Sheets: {added} добавлено, {updated} обновлено")
+            return added, updated
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка синхронизации из Google Sheets: {e}")
+            return 0, 0
+
+# ==================== БАЗОВЫЕ КЛАССЫ (СОХРАНЕНЫ ВСЕ СТАРЫЕ ФУНКЦИИ) ====================
 
 class Validators:
     """Базовый класс валидации"""
@@ -264,203 +482,6 @@ class Database:
         except sqlite3.Error as e:
             logger.error(f"Ошибка получения статистики: {e}")
             return {'total': 0, 'completed': 0, 'new': 0, 'in_progress': 0}
-
-# ==================== КЛАСС ДЛЯ GOOGLE SHEETS ====================
-
-class GoogleSheetsManager:
-    """Менеджер для работы с Google Sheets"""
-    
-    def __init__(self, credentials_json: str, sheet_id: str, sheet_name: str = 'Заявки'):
-        self.credentials_json = credentials_json
-        self.sheet_id = sheet_id
-        self.sheet_name = sheet_name
-        self.client = None
-        self.sheet = None
-        self.is_connected = False
-        self._connect()
-    
-    def _connect(self):
-        """Подключение к Google Sheets"""
-        try:
-            if not self.credentials_json or not self.sheet_id:
-                logger.warning("⚠️ Google Sheets не настроен: отсутствуют credentials или sheet_id")
-                return
-            
-            if not GOOGLE_SHEETS_AVAILABLE:
-                logger.warning("⚠️ Библиотеки Google Sheets не установлены")
-                return
-            
-            # Парсим JSON credentials из переменной окружения
-            creds_dict = json.loads(self.credentials_json)
-            creds = Credentials.from_service_account_info(creds_dict)
-            
-            self.client = gspread.authorize(creds)
-            self.sheet = self.client.open_by_key(self.sheet_id).worksheet(self.sheet_name)
-            self.is_connected = True
-            logger.info("✅ Успешное подключение к Google Sheets")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
-            self.is_connected = False
-    
-    def _ensure_headers(self):
-        """Создает заголовки таблицы если их нет"""
-        if not self.is_connected:
-            return False
-        
-        try:
-            current_data = self.sheet.get_all_records()
-            if not current_data:
-                headers = [
-                    'ID', 'Статус', 'Имя', 'Телефон', 'Участок', 'Тип системы',
-                    'Проблема', 'Срочность', 'Фото', 'ID пользователя', 
-                    'Username', 'Создано', 'Обновлено', 'Исполнитель', 'Завершено'
-                ]
-                self.sheet.append_row(headers)
-                logger.info("✅ Заголовки таблицы созданы")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания заголовков: {e}")
-            return False
-    
-    def add_request(self, request_data: Dict) -> bool:
-        """Добавляет заявку в таблицу"""
-        if not self.is_connected:
-            return False
-        
-        try:
-            if not self._ensure_headers():
-                return False
-            
-            row_data = [
-                request_data.get('id', ''),
-                request_data.get('status', 'new'),
-                request_data.get('name', ''),
-                request_data.get('phone', ''),
-                request_data.get('plot', ''),
-                request_data.get('system_type', ''),
-                request_data.get('problem', ''),
-                request_data.get('urgency', ''),
-                '✅' if request_data.get('photo') else '❌',
-                request_data.get('user_id', ''),
-                request_data.get('username', ''),
-                request_data.get('created_at', ''),
-                request_data.get('updated_at', ''),
-                request_data.get('assigned_to', ''),
-                request_data.get('completed_at', '')
-            ]
-            
-            self.sheet.append_row(row_data)
-            logger.info(f"✅ Заявка #{request_data.get('id')} добавлена в Google Sheets")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка добавления заявки в Google Sheets: {e}")
-            return False
-    
-    def update_request(self, request_id: int, updates: Dict) -> bool:
-        """Обновляет заявку в таблице"""
-        if not self.is_connected:
-            return False
-        
-        try:
-            # Находим строку с заявкой
-            records = self.sheet.get_all_records()
-            for i, record in enumerate(records, start=2):  # start=2 т.к. первая строка - заголовки
-                if record.get('ID') == request_id:
-                    # Обновляем поля
-                    for key, value in updates.items():
-                        column_map = {
-                            'status': 'Статус',
-                            'assigned_to': 'Исполнитель', 
-                            'completed_at': 'Завершено',
-                            'updated_at': 'Обновлено'
-                        }
-                        if key in column_map:
-                            col_name = column_map[key]
-                            col_index = list(records[0].keys()).index(col_name) + 1
-                            self.sheet.update_cell(i, col_index, value)
-                    
-                    logger.info(f"✅ Заявка #{request_id} обновлена в Google Sheets")
-                    return True
-            
-            logger.warning(f"⚠️ Заявка #{request_id} не найдена в Google Sheets для обновления")
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обновления заявки в Google Sheets: {e}")
-            return False
-    
-    def get_all_requests(self) -> List[Dict]:
-        """Получает все заявки из таблицы"""
-        if not self.is_connected:
-            return []
-        
-        try:
-            return self.sheet.get_all_records()
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения данных из Google Sheets: {e}")
-            return []
-    
-    def sync_from_sheets(self, db_manager) -> Tuple[int, int]:
-        """Синхронизация из Google Sheets в базу данных"""
-        if not self.is_connected:
-            return 0, 0
-        
-        try:
-            sheet_requests = self.get_all_requests()
-            if not sheet_requests:
-                return 0, 0
-            
-            updated = 0
-            added = 0
-            
-            for sheet_req in sheet_requests:
-                if not sheet_req.get('ID'):
-                    continue
-                
-                # Проверяем существование заявки в базе
-                existing = db_manager.get_request_by_id(sheet_req['ID'])
-                
-                if existing:
-                    # Обновляем существующую
-                    updates = {}
-                    if sheet_req.get('Статус') and sheet_req['Статус'] != existing.get('status'):
-                        updates['status'] = sheet_req['Статус']
-                    if sheet_req.get('Исполнитель') and sheet_req['Исполнитель'] != existing.get('assigned_to'):
-                        updates['assigned_to'] = sheet_req['Исполнитель']
-                    
-                    if updates:
-                        db_manager.update_request(sheet_req['ID'], updates)
-                        updated += 1
-                else:
-                    # Добавляем новую заявку
-                    request_data = {
-                        'id': sheet_req['ID'],
-                        'status': sheet_req.get('Статус', 'new'),
-                        'name': sheet_req.get('Имя', ''),
-                        'phone': sheet_req.get('Телефон', ''),
-                        'plot': sheet_req.get('Участок', ''),
-                        'system_type': sheet_req.get('Тип системы', ''),
-                        'problem': sheet_req.get('Проблема', ''),
-                        'urgency': sheet_req.get('Срочность', ''),
-                        'user_id': sheet_req.get('ID пользователя', ''),
-                        'username': sheet_req.get('Username', ''),
-                        'created_at': sheet_req.get('Создано', ''),
-                        'updated_at': sheet_req.get('Обновлено', ''),
-                        'assigned_to': sheet_req.get('Исполнитель', ''),
-                        'completed_at': sheet_req.get('Завершено', '')
-                    }
-                    
-                    if db_manager.save_external_request(request_data):
-                        added += 1
-            
-            logger.info(f"✅ Синхронизация из Google Sheets: {added} добавлено, {updated} обновлено")
-            return added, updated
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка синхронизации из Google Sheets: {e}")
-            return 0, 0
 
 # ==================== ОБНОВЛЕННЫЙ КОНФИГУРАЦИОННЫЙ КЛАСС ====================
 
@@ -1736,9 +1757,9 @@ def enhanced_main() -> None:
         # Инициализация Google Sheets
         if config.sync_to_sheets:
             sheets_manager = GoogleSheetsManager(
-                config.google_sheets_credentials,
-                config.google_sheet_id,
-                config.google_sheet_name
+                credentials_json=config.google_sheets_credentials,
+                sheet_id=config.google_sheet_id,
+                sheet_name=config.google_sheet_name
             )
         else:
             logger.info("⚠️ Google Sheets отключен в конфигурации")
