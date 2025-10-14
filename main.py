@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import shutil
+import tempfile
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from telegram import (
@@ -29,8 +30,17 @@ from telegram.ext import (
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
-BOT_TOKEN = os.getenv('BOT_TOKEN', "7391146893:AAFDi7qQTWjscSeqNBueKlWWXbaXK99NpnHw")
-ADMIN_CHAT_IDS = [int(x) for x in os.getenv('ADMIN_CHAT_IDS', '5024165375').split(',')]
+# БЕЗОПАСНОЕ получение токена из переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_CHAT_IDS = [int(x) for x in os.getenv('ADMIN_CHAT_IDS', '').split(',') if x]
+
+# Проверка обязательных переменных
+if not BOT_TOKEN:
+    logging.error("❌ BOT_TOKEN не установлен! Установите переменную окружения BOT_TOKEN")
+    exit(1)
+if not ADMIN_CHAT_IDS:
+    logging.error("❌ ADMIN_CHAT_IDS не установлены! Установите переменную окружения ADMIN_CHAT_IDS")
+    exit(1)
 
 # Расширенные настройки
 MAX_REQUESTS_PER_HOUR = 15
@@ -55,6 +65,33 @@ NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD
 DB_PATH = "requests.db"
 BACKUP_DIR = "backups"
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+# ==================== КОНФИГУРАЦИОННЫЙ КЛАСС ====================
+
+class Config:
+    """Централизованное управление конфигурацией"""
+    def __init__(self):
+        self.bot_token = BOT_TOKEN
+        self.admin_chat_ids = ADMIN_CHAT_IDS
+        self.max_requests_per_hour = MAX_REQUESTS_PER_HOUR
+        self.backup_retention_days = BACKUP_RETENTION_DAYS
+        self.auto_backup_hour = AUTO_BACKUP_HOUR
+        self.auto_backup_minute = AUTO_BACKUP_MINUTE
+        self.request_timeout_hours = REQUEST_TIMEOUT_HOURS
+        self.db_path = DB_PATH
+        self.backup_dir = BACKUP_DIR
+    
+    def validate(self) -> bool:
+        """Проверяет корректность конфигурации"""
+        if not self.bot_token:
+            logger.error("❌ BOT_TOKEN не установлен")
+            return False
+        if not self.admin_chat_ids:
+            logger.error("❌ ADMIN_CHAT_IDS не установлены")
+            return False
+        return True
+
+config = Config()
 
 # ==================== БАЗОВЫЕ КЛАССЫ (для совместимости) ====================
 
@@ -90,22 +127,24 @@ class RateLimiter:
     """Система ограничения запросов"""
     def __init__(self):
         self.requests = {}
+        self.lock = threading.Lock()
     
     def is_limited(self, user_id, action, max_requests):
-        now = datetime.now()
-        hour_key = now.strftime("%Y%m%d%H")
-        
-        if user_id not in self.requests:
-            self.requests[user_id] = {}
-        
-        if action not in self.requests[user_id]:
-            self.requests[user_id][action] = {}
-        
-        if hour_key not in self.requests[user_id][action]:
-            self.requests[user_id][action][hour_key] = 0
-        
-        self.requests[user_id][action][hour_key] += 1
-        return self.requests[user_id][action][hour_key] > max_requests
+        with self.lock:
+            now = datetime.now()
+            hour_key = now.strftime("%Y%m%d%H")
+            
+            if user_id not in self.requests:
+                self.requests[user_id] = {}
+            
+            if action not in self.requests[user_id]:
+                self.requests[user_id][action] = {}
+            
+            if hour_key not in self.requests[user_id][action]:
+                self.requests[user_id][action][hour_key] = 0
+            
+            self.requests[user_id][action][hour_key] += 1
+            return self.requests[user_id][action][hour_key] > max_requests
 
 class Database:
     """Базовая база данных с полной реализацией"""
@@ -186,6 +225,12 @@ class Database:
                     FOREIGN KEY (request_id) REFERENCES requests (id)
                 )
             ''')
+            
+            # Индексы для улучшения производительности
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_request_id ON request_history(request_id)')
             
             conn.commit()
     
@@ -307,6 +352,57 @@ class AdvancedValidators(Validators):
         
         return True, cleaned
 
+class MediaManager:
+    """Менеджер медиафайлов с улучшенной обработкой"""
+    
+    @staticmethod
+    def validate_photo_size(file_size: int) -> bool:
+        """Проверяет размер файла"""
+        return file_size <= 10 * 1024 * 1024  # 10MB
+    
+    @staticmethod
+    def get_photo_info(photo_file) -> Dict:
+        """Получает информацию о фото"""
+        return {
+            'file_id': photo_file.file_id,
+            'file_size': photo_file.file_size,
+            'width': photo_file.width,
+            'height': photo_file.height
+        }
+
+class CacheManager:
+    """Менеджер кэширования для улучшения производительности"""
+    
+    def __init__(self):
+        self._cache = {}
+        self._lock = threading.Lock()
+        self._stats_cache = {}
+        self._user_stats_cache = {}
+    
+    def get_cached_stats(self, days: int) -> Dict:
+        """Получает кэшированную статистику"""
+        cache_key = f"stats_{days}"
+        with self._lock:
+            if cache_key in self._stats_cache:
+                cached_data, timestamp = self._stats_cache[cache_key]
+                # Кэш действителен 5 минут
+                if datetime.now() - timestamp < timedelta(minutes=5):
+                    return cached_data
+        return None
+    
+    def set_cached_stats(self, days: int, data: Dict):
+        """Сохраняет статистику в кэш"""
+        cache_key = f"stats_{days}"
+        with self._lock:
+            self._stats_cache[cache_key] = (data, datetime.now())
+    
+    def clear_cache(self):
+        """Очищает кэш"""
+        with self._lock:
+            self._cache.clear()
+            self._stats_cache.clear()
+            self._user_stats_cache.clear()
+
 class NotificationManager:
     """Менеджер уведомлений с расширенными функциями"""
     
@@ -348,6 +444,7 @@ class NotificationManager:
     def process_queue(self):
         """Обрабатывает очередь уведомлений (вызывается периодически)"""
         with self.lock:
+            processed = 0
             for notification in self.notification_queue[:10]:  # Обрабатываем первые 10
                 try:
                     if notification['photo']:
@@ -372,6 +469,7 @@ class NotificationManager:
                             parse_mode=ParseMode.MARKDOWN
                         )
                     self.notification_queue.remove(notification)
+                    processed += 1
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления: {e}")
                     # Удаляем проблемное уведомление после 3 попыток
@@ -379,6 +477,7 @@ class NotificationManager:
                         self.notification_queue.remove(notification)
                     else:
                         notification['attempts'] = notification.get('attempts', 0) + 1
+            return processed
 
 class EnhancedBackupManager(BackupManager):
     """Расширенный менеджер бэкапов"""
@@ -907,7 +1006,14 @@ def enhanced_send_admin_notification(context: CallbackContext, user_data: Dict, 
 def show_user_statistics(update: Update, context: CallbackContext) -> None:
     """Показывает статистику пользователя"""
     user_id = update.message.from_user.id
-    user_stats = db.get_user_statistics(user_id)
+    
+    # Проверяем кэш
+    cached_stats = cache_manager.get_cached_stats(f"user_{user_id}")
+    if cached_stats:
+        user_stats = cached_stats
+    else:
+        user_stats = db.get_user_statistics(user_id)
+        cache_manager.set_cached_stats(f"user_{user_id}", user_stats)
     
     if not user_stats or user_stats.get('total_requests', 0) == 0:
         update.message.reply_text(
@@ -920,7 +1026,7 @@ def show_user_statistics(update: Update, context: CallbackContext) -> None:
         return
     
     # Рассчитываем дополнительные метрики
-    completion_rate = (user_stats['completed'] / user_stats['total_requests']) * 100
+    completion_rate = (user_stats['completed'] / user_stats['total_requests']) * 100 if user_stats['total_requests'] > 0 else 0
     avg_hours = user_stats.get('avg_completion_hours', 0)
     
     stats_text = (
@@ -1058,8 +1164,14 @@ def show_enhanced_admin_panel(update: Update, context: CallbackContext) -> None:
         update.message.reply_text("❌ У вас нет доступа к админ-панели.")
         return show_main_menu(update, context)
     
-    # Получаем расширенную статистику
-    stats = db.get_statistics(7)  # За 7 дней
+    # Получаем расширенную статистику с кэшированием
+    cached_stats = cache_manager.get_cached_stats("admin_7")
+    if cached_stats:
+        stats = cached_stats
+    else:
+        stats = db.get_statistics(7)  # За 7 дней
+        cache_manager.set_cached_stats("admin_7", stats)
+    
     urgent_requests = db.get_urgent_requests()
     stuck_requests = db.get_stuck_requests(REQUEST_TIMEOUT_HOURS)
     
@@ -1325,6 +1437,8 @@ def enhanced_handle_admin_menu(update: Update, context: CallbackContext) -> None
     elif text == '💾 Бэкапы':
         return show_backup_management(update, context)
     elif text == '🔄 Обновить':
+        # Очищаем кэш при обновлении
+        cache_manager.clear_cache()
         return show_enhanced_admin_panel(update, context)
 
 def show_urgent_requests(update: Update, context: CallbackContext) -> None:
@@ -1371,9 +1485,14 @@ def show_analytics(update: Update, context: CallbackContext) -> None:
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    # Статистика за разные периоды
-    stats_7_days = db.get_statistics(7)
-    stats_30_days = db.get_statistics(30)
+    # Статистика за разные периоды с кэшированием
+    stats_7_days = cache_manager.get_cached_stats("stats_7") or db.get_statistics(7)
+    stats_30_days = cache_manager.get_cached_stats("stats_30") or db.get_statistics(30)
+    
+    if not cache_manager.get_cached_stats("stats_7"):
+        cache_manager.set_cached_stats("stats_7", stats_7_days)
+    if not cache_manager.get_cached_stats("stats_30"):
+        cache_manager.set_cached_stats("stats_30", stats_30_days)
     
     analytics_text = (
         "📈 *Аналитика системы*\n\n"
@@ -1461,7 +1580,13 @@ def handle_edit_field(update: Update, context: CallbackContext):
     
     if field == 'photo':
         if update.message.photo:
-            context.user_data[field] = update.message.photo[-1].file_id
+            # Используем менеджер медиа для проверки
+            photo_info = MediaManager.get_photo_info(update.message.photo[-1])
+            if MediaManager.validate_photo_size(photo_info['file_size']):
+                context.user_data[field] = photo_info['file_id']
+            else:
+                update.message.reply_text("❌ Фото слишком большое. Максимальный размер 10MB.")
+                return EDIT_FIELD
         else:
             context.user_data[field] = None
     else:
@@ -1526,7 +1651,11 @@ def show_statistics(update: Update, context: CallbackContext):
     if user_id not in ADMIN_CHAT_IDS:
         return
     
-    stats = db.get_statistics(7)
+    # Используем кэшированную статистику
+    stats = cache_manager.get_cached_stats("stats_7") or db.get_statistics(7)
+    if not cache_manager.get_cached_stats("stats_7"):
+        cache_manager.set_cached_stats("stats_7", stats)
+    
     update.message.reply_text(
         f"📊 Статистика за 7 дней:\n\n"
         f"• Всего заявок: {stats['total']}\n"
@@ -1666,13 +1795,16 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
 rate_limiter = RateLimiter()
 db = None
 notification_manager = None
+cache_manager = CacheManager()
+media_manager = MediaManager()
 
 def enhanced_main() -> None:
     """Улучшенный запуск бота"""
     global db, notification_manager
     
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("❌ Токен бота не установлен! Замените BOT_TOKEN на реальный токен.")
+    # Проверка конфигурации
+    if not config.validate():
+        logger.error("❌ Неверная конфигурация бота!")
         return
     
     try:
@@ -1714,6 +1846,13 @@ def enhanced_main() -> None:
                 lambda context: EnhancedBackupManager.cleanup_old_backups(),
                 interval=604800,  # 7 дней
                 first=3600
+            )
+            
+            # Очистка кэша каждые 10 минут
+            job_queue.run_repeating(
+                lambda context: cache_manager.clear_cache(),
+                interval=600,
+                first=300
             )
 
         # Обработчик создания заявки (сохраняем старый)
@@ -1811,6 +1950,7 @@ def enhanced_main() -> None:
         logger.info(f"💾 Автоматические бэкапы: {AUTO_BACKUP_HOUR}:{AUTO_BACKUP_MINUTE:02d}")
         logger.info(f"📊 Лимит заявок: {MAX_REQUESTS_PER_HOUR}/час")
         logger.info(f"⏰ Таймаут заявок: {REQUEST_TIMEOUT_HOURS} часов")
+        logger.info(f"💾 Кэширование: включено")
         
         updater.start_polling()
         updater.idle()
