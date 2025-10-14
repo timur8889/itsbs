@@ -51,9 +51,10 @@ user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
-# Главное меню администратора
+# Главное меню администратора (ОБНОВЛЕНО - добавлены счетчики)
 admin_main_menu_keyboard = [
-    ['👑 Админ-панель']
+    ['🆕 Новые заявки (0)', '🔄 В работе (0)'],
+    ['✅ Выполненные заявки']
 ]
 
 # Меню создания заявки
@@ -87,12 +88,6 @@ edit_choice_keyboard = [
 ]
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
-
-# Админ-панель (НОВЫЕ ЗАЯВКИ, В РАБОТЕ И ВЫПОЛНЕННЫЕ)
-admin_panel_keyboard = [
-    ['🆕 Новые заявки', '🔄 В работе'],
-    ['✅ Выполненные заявки']
-]
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -492,7 +487,7 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
                 # Администратору показываем админ-панель
                 update.message.reply_text(
                     confirmation_text,
-                    reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
@@ -511,7 +506,7 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
             if user.id in ADMIN_CHAT_IDS:
                 update.message.reply_text(
                     "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
-                    reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
@@ -569,7 +564,7 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
         # Администратору показываем админ-панель
         update.message.reply_text(
             "❌ Создание заявки отменено.",
-            reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
         )
     else:
         update.message.reply_text(
@@ -772,6 +767,16 @@ def cancel_editing(update: Update, context: CallbackContext) -> int:
 
 # ==================== ВИЗУАЛЬНОЕ МЕНЮ ====================
 
+def get_admin_panel_with_counters():
+    """Возвращает админ-панель с актуальными счетчиками"""
+    new_requests = db.get_requests_by_filter('new')
+    in_progress_requests = db.get_requests_by_filter('in_progress')
+    
+    return [
+        [f'🆕 Новые заявки ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
+        ['✅ Выполненные заявки']
+    ]
+
 def show_main_menu(update: Update, context: CallbackContext) -> None:
     """Показывает главное меню"""
     user = update.message.from_user
@@ -926,7 +931,7 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
     
     update.message.reply_text(
         admin_text,
-        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -947,13 +952,13 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     if not requests:
         update.message.reply_text(
             f"📭 {filter_name} отсутствуют.",
-            reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
         )
         return
     
     update.message.reply_text(
         filter_name,
-        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
     )
     
     for req in requests:
@@ -1002,7 +1007,7 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('admin_comment'):
             request_text += f"\n💬 *Комментарий администратора:* {req['admin_comment']}"
         
-        # Определяем кнопки в зависимости от статуса заявки (УДАЛЕНЫ КНОПКИ "ПОЗВОНИТЬ")
+        # Определяем кнопки в зависимости от статуса заявки
         if req['status'] == 'completed':
             # Для выполненных заявок - только кнопка "Написать"
             keyboard = [[
@@ -1058,6 +1063,37 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         request_id = int(data.split('_')[1])
         admin_name = query.from_user.first_name
         
+        # ДОБАВЛЕНО: Подтверждение взятия в работу
+        confirmation_text = (
+            f"⚠️ *Подтверждение*\n\n"
+            f"Вы действительно хотите взять в работу заявку #{request_id}?\n\n"
+            f"👤 *Клиент:* {db.get_request(request_id)['name']}\n"
+            f"📍 *Участок:* {db.get_request(request_id)['plot']}\n"
+            f"🔧 *Тип системы:* {db.get_request(request_id)['system_type']}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Да, взять в работу", callback_data=f"confirm_take_{request_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_take_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data.startswith('confirm_take_'):
+        request_id = int(data.split('_')[2])
+        admin_name = query.from_user.first_name
+        
         # Обновляем статус заявки и назначаем администратора
         db.update_request_status(
             request_id, 
@@ -1093,7 +1129,7 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"👨‍💼 *Исполнитель:* {admin_name}"
         )
         
-        # Обновляем inline-клавиатуру - добавляем кнопку "Выполнено" (БЕЗ КНОПКИ "ПОЗВОНИТЬ")
+        # Обновляем inline-клавиатуру
         keyboard = [[
             InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
             InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
@@ -1112,8 +1148,78 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
         
+        query.answer("✅ Заявка взята в работу!")
+        
+    elif data.startswith('cancel_take_'):
+        request_id = int(data.split('_')[2])
+        request = db.get_request(request_id)
+        
+        # Возвращаем к исходному состоянию заявки
+        request_text = (
+            f"🆕 *Заявка #{request_id} - НОВАЯ*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{request_id}"),
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("❌ Действие отменено")
+        
     elif data.startswith('complete_'):
         request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        # ДОБАВЛЕНО: Подтверждение выполнения
+        confirmation_text = (
+            f"⚠️ *Подтверждение выполнения*\n\n"
+            f"Вы действительно хотите отметить заявку #{request_id} как выполненную?\n\n"
+            f"👤 *Клиент:* {db.get_request(request_id)['name']}\n"
+            f"📍 *Участок:* {db.get_request(request_id)['plot']}\n"
+            f"🔧 *Тип системы:* {db.get_request(request_id)['system_type']}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Да, выполнено", callback_data=f"confirm_complete_{request_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_complete_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data.startswith('confirm_complete_'):
+        request_id = int(data.split('_')[2])
         admin_name = query.from_user.first_name
         
         # Обновляем статус заявки на "выполнено"
@@ -1155,7 +1261,7 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"🕒 *Завершена:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         
-        # Обновляем inline-клавиатуру для выполненных заявок (БЕЗ КНОПКИ "ПОЗВОНИТЬ")
+        # Обновляем inline-клавиатуру для выполненных заявок
         keyboard = [[
             InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
         ]]
@@ -1173,46 +1279,63 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
         
-        # Отправляем подтверждение администратору
         query.answer("✅ Заявка выполнена!")
+        
+    elif data.startswith('cancel_complete_'):
+        request_id = int(data.split('_')[2])
+        request = db.get_request(request_id)
+        
+        # Возвращаем к исходному состоянию заявки
+        request_text = (
+            f"🔄 *Заявка #{request_id} - В РАБОТЕ*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n"
+            f"👨‍💼 *Исполнитель:* {request.get('assigned_admin', 'Не назначен')}\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("❌ Действие отменено")
     
     elif data.startswith('message_'):
         request_id = int(data.split('_')[1])
         request = db.get_request(request_id)
         
         if request:
-            # Получаем информацию о пользователе из базы данных
-            user_info = ""
-            if request.get('username'):
-                user_info = f"💬 *Username:* @{request['username']}\n"
-            
+            # УДАЛЕНА: Кнопка "Найти в Telegram по номеру"
             contact_text = (
                 f"💬 *Контактная информация по заявке #{request_id}*\n\n"
                 f"👤 *Клиент:* {request['name']}\n"
                 f"📞 *Телефон:* `{request['phone']}`\n"
-                f"{user_info}"
                 f"📍 *Участок:* {request['plot']}\n"
                 f"🔧 *Тип системы:* {request['system_type']}\n"
                 f"⏰ *Срочность:* {request['urgency']}\n\n"
             )
             
-            # Создаем кнопки для контакта
+            # Создаем кнопки для контакта (ТОЛЬКО если есть username)
             keyboard_buttons = []
-            
-            # Кнопка для поиска по номеру телефона в Telegram
-            if request.get('phone'):
-                # Очищаем номер телефона
-                clean_phone = request['phone'].replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
-                # Убираем + для поиска
-                search_phone = clean_phone.replace('+', '')
-                
-                # Добавляем кнопку поиска в Telegram
-                keyboard_buttons.append([
-                    InlineKeyboardButton(
-                        "🔍 Найти в Telegram по номеру", 
-                        url=f"https://t.me/search?query={search_phone}"
-                    )
-                ])
             
             # Если есть username, добавляем кнопку прямого сообщения
             if request.get('username'):
@@ -1222,17 +1345,17 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                         url=f"https://t.me/{request['username']}"
                     )
                 ])
+                contact_text += f"💬 *Username:* @{request['username']}\n\n"
             else:
                 # Если username нет, показываем инструкцию
                 contact_text += (
                     "_Для связи с клиентом:_\n"
                     "1. *Скопируйте номер телефона выше*\n"
-                    "2. *Нажмите кнопку '🔍 Найти в Telegram по номеру'*\n"
-                    "3. *Или найдите номер вручную в поиске Telegram*\n\n"
+                    "2. *Найдите номер вручную в поиске Telegram*\n\n"
                     "_Если у клиента нет аккаунта Telegram, свяжитесь по телефону_"
                 )
             
-            query.answer("💬 Открывается поиск контакта...")
+            query.answer("💬 Контактная информация")
             
             # Отправляем отдельное сообщение с кнопками для связи
             context.bot.send_message(
@@ -1272,9 +1395,10 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    if text == '🆕 Новые заявки':
+    # ОБНОВЛЕНО: Обработка кнопок с счетчиками
+    if text.startswith('🆕 Новые заявки'):
         return show_requests_by_filter(update, context, 'new')
-    elif text == '🔄 В работе':
+    elif text.startswith('🔄 В работе'):
         return show_requests_by_filter(update, context, 'in_progress')
     elif text == '✅ Выполненные заявки':
         return show_requests_by_filter(update, context, 'completed')
@@ -1337,16 +1461,19 @@ def main() -> None:
         dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         
         # Обработчики главного меню
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки)$'), handle_main_menu))
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)'), 
             handle_admin_menu
         ))
         
-        # Обработчики callback для админ-панели (УДАЛЕНЫ call_ и copy_)
-        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message_)'))
+        # Обработчики callback для админ-панели (ОБНОВЛЕНЫ - добавлены новые callback)
+        dispatcher.add_handler(CallbackQueryHandler(
+            handle_admin_callback, 
+            pattern='^(take_|complete_|message_|confirm_take_|cancel_take_|confirm_complete_|cancel_complete_)'
+        ))
 
         # Запускаем бота
         logger.info("🤖 Бот запущен с визуальным меню!")
