@@ -139,6 +139,7 @@ class GoogleSheetsManager:
         try:
             if not os.path.exists(self.config['credentials_file']):
                 logger.error(f"❌ Файл учетных данных {self.config['credentials_file']} не найден")
+                self._create_sample_credentials()
                 return
 
             # Авторизация
@@ -174,6 +175,26 @@ class GoogleSheetsManager:
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
             self.connected = False
+
+    def _create_sample_credentials(self):
+        """Создает пример файла credentials.json"""
+        sample_credentials = {
+            "type": "service_account",
+            "project_id": "your-project-id",
+            "private_key_id": "your-private-key-id",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n",
+            "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+            "client_id": "your-client-id",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+        }
+        
+        with open('credentials_sample.json', 'w', encoding='utf-8') as f:
+            json.dump(sample_credentials, f, indent=2)
+        
+        logger.info("📝 Создан пример файла credentials_sample.json. Замените его на реальные учетные данные.")
 
     def _create_headers(self):
         """Создает заголовки таблицы"""
@@ -510,7 +531,6 @@ class Database:
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-    # ... остальные методы базы данных остаются без изменений ...
     def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict]:
         """Получает заявки пользователя"""
         with sqlite3.connect(self.db_path) as conn:
@@ -852,7 +872,399 @@ def view_excel_data(update: Update, context: CallbackContext) -> None:
             reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
         )
 
-# ==================== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ====================
+# ==================== ОСНОВНЫЕ ФУНКЦИИ БОТА ====================
+
+def start_request_creation(update: Update, context: CallbackContext) -> int:
+    """Начинает процесс создания заявки"""
+    context.user_data.clear()
+    
+    user = update.message.from_user
+    context.user_data.update({
+        'user_id': user.id,
+        'username': user.username,
+        'first_name': user.first_name,
+        'last_name': user.last_name
+    })
+    
+    update.message.reply_text(
+        "📝 *Создание новой заявки*\n\n"
+        "Для начала укажите ваше имя:",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return NAME
+
+def name(update: Update, context: CallbackContext) -> int:
+    context.user_data['name'] = update.message.text
+    update.message.reply_text(
+        "📞 *Укажите ваш контактный телефон:*\n\nПример: +7 999 123-45-67",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PHONE
+
+def phone(update: Update, context: CallbackContext) -> int:
+    context.user_data['phone'] = update.message.text
+    update.message.reply_text(
+        "📍 *Выберите тип участка:*",
+        reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PLOT
+
+def plot(update: Update, context: CallbackContext) -> int:
+    if update.message.text == '🔙 Назад':
+        update.message.reply_text(
+            "Укажите ваше имя:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return NAME
+    
+    context.user_data['plot'] = update.message.text
+    update.message.reply_text(
+        "🔧 *Выберите тип системы:*",
+        reply_markup=ReplyKeyboardMarkup(create_request_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return SYSTEM_TYPE
+
+def system_type(update: Update, context: CallbackContext) -> int:
+    if update.message.text == '🔙 Назад в меню':
+        return show_main_menu(update, context)
+    elif update.message.text == '🔙 Назад':
+        update.message.reply_text(
+            "📍 *Выберите тип участка:*",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+        )
+        return PLOT
+    
+    context.user_data['system_type'] = update.message.text
+    update.message.reply_text(
+        "📝 *Опишите проблему или необходимые работы:*\n\nПример: Не работает видеонаблюдение на фрезерном участке",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PROBLEM
+
+def problem(update: Update, context: CallbackContext) -> int:
+    context.user_data['problem'] = update.message.text
+    update.message.reply_text(
+        "⏰ *Выберите срочность выполнения работ:*",
+        reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return URGENCY
+
+def urgency(update: Update, context: CallbackContext) -> int:
+    if update.message.text == '🔙 Назад':
+        update.message.reply_text(
+            "📝 *Опишите проблему или необходимые работы:*",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return PROBLEM
+    
+    context.user_data['urgency'] = update.message.text
+    update.message.reply_text(
+        "📸 *Хотите добавить фото к заявке?*\n\nФото поможет специалисту лучше понять проблему.",
+        reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PHOTO
+
+def photo(update: Update, context: CallbackContext) -> int:
+    if update.message.text == '🔙 Назад':
+        update.message.reply_text(
+            "⏰ *Выберите срочность выполнения работ:*",
+            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True)
+        )
+        return URGENCY
+    elif update.message.text == '📷 Добавить фото':
+        update.message.reply_text(
+            "📸 *Отправьте фото:*",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return PHOTO
+    elif update.message.text == '⏭️ Пропустить фото':
+        context.user_data['photo'] = None
+        return show_request_summary(update, context)
+    elif update.message.photo:
+        context.user_data['photo'] = update.message.photo[-1].file_id
+        update.message.reply_text(
+            "✅ Фото добавлено!",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return show_request_summary(update, context)
+    else:
+        update.message.reply_text(
+            "❌ Пожалуйста, отправьте фото или используйте кнопки.",
+            reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True)
+        )
+        return PHOTO
+
+def update_summary(context: CallbackContext) -> None:
+    """Обновляет сводку заявки в user_data"""
+    photo_status = "✅ Есть" if context.user_data.get('photo') else "❌ Нет"
+    
+    summary = (
+        f"📋 *Сводка заявки:*\n\n"
+        f"📛 *Имя:* {context.user_data['name']}\n"
+        f"📞 *Телефон:* `{context.user_data['phone']}`\n"
+        f"📍 *Участок:* {context.user_data['plot']}\n"
+        f"🔧 *Тип системы:* {context.user_data['system_type']}\n"
+        f"📝 *Описание:* {context.user_data['problem']}\n"
+        f"⏰ *Срочность:* {context.user_data['urgency']}\n"
+        f"📸 *Фото:* {photo_status}\n"
+        f"🕒 *Время:* {context.user_data.get('timestamp', 'Не указано')}"
+    )
+    
+    context.user_data['summary'] = summary
+
+def show_request_summary(update: Update, context: CallbackContext) -> int:
+    """Показывает сводку заявки перед отправкой"""
+    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+    update_summary(context)
+    
+    # Определяем, откуда пришли - из создания или редактирования
+    if context.user_data.get('editing_mode'):
+        # Режим редактирования - показываем меню редактирования
+        return edit_request_choice(update, context)
+    else:
+        # Режим создания - показываем подтверждение
+        if context.user_data.get('photo'):
+            update.message.reply_photo(
+                photo=context.user_data['photo'],
+                caption=f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return ConversationHandler.END
+
+def confirm_request(update: Update, context: CallbackContext) -> None:
+    """Подтверждает и отправляет заявку"""
+    if update.message.text == '✅ Подтвердить отправку':
+        user = update.message.from_user
+        
+        try:
+            # Сохраняем заявку в базу данных
+            request_id = db.save_request(context.user_data)
+            
+            # Отправляем уведомление администраторам
+            send_admin_notification(context, context.user_data, request_id)
+            
+            # Подтверждение пользователю
+            confirmation_text = (
+                f"✅ *Заявка #{request_id} успешно создана!*\n\n"
+                f"📞 Наш специалист свяжется с вами в ближайшее время.\n"
+                f"⏱️ *Срочность:* {context.user_data['urgency']}\n\n"
+                f"_Спасибо за обращение в службу слаботочных систем завода Контакт!_ 🛠️"
+            )
+            
+            # Определяем клавиатуру в зависимости от прав
+            if user.id in ADMIN_CHAT_IDS:
+                # Администратору показываем админ-панель
+                update.message.reply_text(
+                    confirmation_text,
+                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                update.message.reply_text(
+                    confirmation_text,
+                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
+            logger.info(f"Новая заявка #{request_id} от {user.username}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении заявки: {e}")
+            
+            # Определяем клавиатуру в зависимости от прав
+            if user.id in ADMIN_CHAT_IDS:
+                update.message.reply_text(
+                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
+                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                update.message.reply_text(
+                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
+                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        
+        context.user_data.clear()
+        
+    elif update.message.text == '✏️ Редактировать заявку':
+        # Включаем режим редактирования
+        context.user_data['editing_mode'] = True
+        return edit_request_choice(update, context)
+
+def send_admin_notification(context: CallbackContext, user_data: Dict, request_id: int) -> None:
+    """Отправляет уведомление администраторам о новой заявке"""
+    notification_text = (
+        f"🚨 *НОВАЯ ЗАЯВКА #{request_id}*\n\n"
+        f"👤 *Пользователь:* @{user_data.get('username', 'N/A')}\n"
+        f"📛 *Имя:* {user_data.get('name')}\n"
+        f"📞 *Телефон:* `{user_data.get('phone')}`\n"
+        f"📍 *Участок:* {user_data.get('plot')}\n"
+        f"🔧 *Система:* {user_data.get('system_type')}\n"
+        f"⏰ *Срочность:* {user_data.get('urgency')}\n"
+        f"📸 *Фото:* {'✅ Есть' if user_data.get('photo') else '❌ Нет'}\n\n"
+        f"📝 *Описание:* {user_data.get('problem')}\n\n"
+        f"🕒 *Время:* {user_data.get('timestamp', 'Не указано')}"
+    )
+    
+    for admin_id in ADMIN_CHAT_IDS:
+        try:
+            if user_data.get('photo'):
+                context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=user_data['photo'],
+                    caption=notification_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                context.bot.send_message(
+                    chat_id=admin_id,
+                    text=notification_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления администратору {admin_id}: {e}")
+
+def cancel_request(update: Update, context: CallbackContext) -> int:
+    """Отменяет создание заявки"""
+    user_id = update.message.from_user.id
+    
+    if user_id in ADMIN_CHAT_IDS:
+        # Администратору показываем админ-панель
+        update.message.reply_text(
+            "❌ Создание заявки отменено.",
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+        )
+    else:
+        update.message.reply_text(
+            "❌ Создание заявки отменено.",
+            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
+        )
+    
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ==================== ВИЗУАЛЬНОЕ МЕНЮ ====================
+
+def get_admin_panel_with_counters():
+    """Возвращает админ-панель с актуальными счетчиками"""
+    new_requests = db.get_requests_by_filter('new')
+    in_progress_requests = db.get_requests_by_filter('in_progress')
+    
+    return [
+        [f'🆕 Новые заявки ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
+        ['✅ Выполненные заявки', '📊 Статистика'],
+        ['🔧 Управление', '📊 Excel онлайн']
+    ]
+
+def show_main_menu(update: Update, context: CallbackContext) -> None:
+    """Показывает главное меню"""
+    user = update.message.from_user
+    user_id = user.id
+    
+    # Обновляем активность пользователя
+    if user_id not in ADMIN_CHAT_IDS:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, last_activity)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM users WHERE user_id = ?), ?), ?)
+            ''', (
+                user.id,
+                user.username,
+                user.first_name,
+                user.last_name,
+                user.id,
+                datetime.now().isoformat(),
+                datetime.now().isoformat()
+            ))
+            conn.commit()
+    
+    # Определяем клавиатуру в зависимости от прав
+    if user_id in ADMIN_CHAT_IDS:
+        # Администратору показываем сразу админ-панель
+        return show_admin_panel(update, context)
+    else:
+        keyboard = user_main_menu_keyboard
+        welcome_text = (
+            "🏭 *Добро пожаловать в сервис заявок для слаботочных систем завода Контакт!*\n\n"
+            "🔧 *Мы обслуживаем:*\n"
+            "• 📹 Системы видеонаблюдения\n"
+            "• 🔐 Системы контроля доступа (СКУД)\n" 
+            "• 🌐 Компьютерные сети\n"
+            "• 🚨 Пожарные сигнализации\n\n"
+            "Выберите действие из меню ниже:"
+        )
+    
+    update.message.reply_text(
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def show_admin_panel(update: Update, context: CallbackContext) -> None:
+    """Показывает админ-панель с новыми, в работе и выполненными заявками"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        update.message.reply_text("❌ У вас нет доступа к админ-панели.")
+        return show_main_menu(update, context)
+    
+    # Получаем количество заявок по статусам
+    new_requests = db.get_requests_by_filter('new')
+    in_progress_requests = db.get_requests_by_filter('in_progress')
+    completed_requests = db.get_requests_by_filter('completed')
+    
+    admin_text = (
+        "👑 *Админ-панель завода Контакт*\n\n"
+        f"🆕 *Новых заявок:* {len(new_requests)}\n"
+        f"🔄 *Заявок в работе:* {len(in_progress_requests)}\n"
+        f"✅ *Выполненных заявок:* {len(completed_requests)}\n\n"
+        "Выберите раздел для просмотра:"
+    )
+    
+    update.message.reply_text(
+        admin_text,
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
+
+def handle_main_menu(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает выбор в главном меню"""
+    text = update.message.text
+    user_id = update.message.from_user.id
+    
+    # Для администраторов показываем только админ-панель
+    if user_id in ADMIN_CHAT_IDS:
+        return show_admin_panel(update, context)
+    
+    # Для обычных пользователей
+    if text == '📝 Создать заявку':
+        return start_request_creation(update, context)
+    elif text == '📋 Мои заявки':
+        return show_my_requests(update, context)
+    else:
+        update.message.reply_text(
+            "Пожалуйста, выберите действие из меню:",
+            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
+        )
 
 def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     """Обрабатывает выбор в админ-меню"""
@@ -897,9 +1309,8 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     elif text == '🔙 Назад в админ-панель':
         return show_admin_panel(update, context)
 
-# ... остальной код остается без изменений (функции создания заявок, админ-панели и т.д.) ...
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
-# В функции main добавьте обработчики для Excel онлайн:
 def main() -> None:
     """Запускаем бота"""
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
@@ -910,15 +1321,60 @@ def main() -> None:
         updater = Updater(BOT_TOKEN)
         dispatcher = updater.dispatcher
 
-        # ... существующие обработчики ...
+        # Обработчик создания заявки
+        conv_handler = ConversationHandler(
+            entry_points=[
+                MessageHandler(Filters.regex('^(📝 Создать заявку)$'), start_request_creation),
+            ],
+            states={
+                NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
+                PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
+                PLOT: [MessageHandler(Filters.text & ~Filters.command, plot)],
+                SYSTEM_TYPE: [MessageHandler(Filters.text & ~Filters.command, system_type)],
+                PROBLEM: [MessageHandler(Filters.text & ~Filters.command, problem)],
+                URGENCY: [MessageHandler(Filters.text & ~Filters.command, urgency)],
+                PHOTO: [
+                    MessageHandler(Filters.text & ~Filters.command, photo),
+                    MessageHandler(Filters.photo, photo)
+                ],
+                EDIT_CHOICE: [MessageHandler(Filters.text & ~Filters.command, handle_edit_choice)],
+                EDIT_FIELD: [
+                    MessageHandler(Filters.text & ~Filters.command, handle_edit_field),
+                    MessageHandler(Filters.photo, handle_edit_field)
+                ],
+            },
+            fallbacks=[
+                CommandHandler('cancel', cancel_request),
+                MessageHandler(Filters.regex('^(🔙 Назад в меню)$'), cancel_request),
+                MessageHandler(Filters.regex('^(✅ Завершить редактирование)$'), show_request_summary)
+            ],
+            allow_reentry=True
+        )
 
-        # Обработчики Excel онлайн
+        # Отдельный обработчик для кнопки редактирования заявки
+        edit_handler = MessageHandler(
+            Filters.regex('^(✏️ Редактировать заявку)$'), 
+            confirm_request
+        )
+
+        # Регистрируем обработчики команд
+        dispatcher.add_handler(CommandHandler('start', show_main_menu))
+        dispatcher.add_handler(CommandHandler('menu', show_main_menu))
+        dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
+        
+        # Обработчики разговоров
+        dispatcher.add_handler(conv_handler)
+        dispatcher.add_handler(edit_handler)
+        
+        # Обработчики кнопок
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки)$'), handle_main_menu))
+        
+        # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(📊 Excel онлайн|🔄 Обновить данные|📊 Статистика Excel|⚙️ Настройки Excel|📋 Просмотреть Excel)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔧 Управление|📊 Excel онлайн|📢 Сделать рассылку|🔄 Обновить счетчики|📁 Экспорт заявок|🔄 Синхронизировать с Excel|🔙 Назад в админ-панель|🔄 Обновить данные|📊 Статистика Excel|⚙️ Настройки Excel|📋 Просмотреть Excel)$'), 
             handle_admin_menu
         ))
-
-        # ... остальные обработчики ...
 
         # Запускаем бота
         logger.info("🤖 Бот запущен с интеграцией Google Sheets!")
