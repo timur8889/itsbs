@@ -796,6 +796,99 @@ class EnhancedDatabase(Database):
             return {}
 
 nager(
+# ==================== МУЛЬТИЯЗЫЧНАЯ ПОДДЕРЖКА ====================
+
+class Internationalization:
+    def __init__(self):
+        self.translations = {
+            'ru': {
+                'welcome': "Добро пожаловать!",
+                'create_request': "Создать заявку",
+                'my_requests': "Мои заявки",
+                'help': "Помощь",
+            },
+            'en': {
+                'welcome': "Welcome!",
+                'create_request': "Create request", 
+                'my_requests': "My requests",
+                'help': "Help",
+            }
+        }
+        self.user_languages = {}
+    
+    def set_language(self, user_id, language):
+        if language in self.translations:
+            self.user_languages[user_id] = language
+    
+    def get_text(self, user_id, key):
+        lang = self.user_languages.get(user_id, 'ru')
+        return self.translations.get(lang, {}).get(key, key)
+
+# ==================== ГЕЙМИФИКАЦИЯ ====================
+
+class GamificationEngine:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.init_gamification()
+    
+    def init_gamification(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_points (
+                    user_id INTEGER PRIMARY KEY,
+                    points INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 1,
+                    achievements TEXT DEFAULT '[]',
+                    last_activity TEXT
+                )
+            ''')
+            conn.commit()
+    
+    def award_points(self, user_id, action):
+        """Начисляет очки за действие"""
+        point_values = {
+            'create_request': 10,
+            'request_completed': 5,
+            'first_request': 25
+        }
+        
+        points_to_award = point_values.get(action, 0)
+        
+        if points_to_award > 0:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO user_points 
+                    (user_id, points, level, last_activity)
+                    VALUES (?, 
+                        COALESCE((SELECT points FROM user_points WHERE user_id = ?), 0) + ?,
+                        COALESCE((SELECT level FROM user_points WHERE user_id = ?), 1),
+                        ?
+                    )
+                ''', (user_id, user_id, points_to_award, user_id, datetime.now().isoformat()))
+                conn.commit()
+    
+    def get_user_stats(self, user_id):
+        """Возвращает статистику пользователя"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT points, level FROM user_points WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone()
+            return {'points': result[0] if result else 0, 'level': result[1] if result else 1}
+    
+    def get_leaderboard(self, limit=10):
+        """Возвращает таблицу лидеров"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, points, level 
+                FROM user_points 
+                ORDER BY points DESC 
+                LIMIT ?
+            ''', (limit,))
+            return cursor.fetchall()
+
 # ==================== ИНИЦИАЛИЗАЦИЯ ВСЕХ СИСТЕМ ====================
 
 def initialize_all_systems():
@@ -842,7 +935,7 @@ def initialize_all_systems():
 
 # ==================== ЗАПУСК СИСТЕМ ====================
 
-# Глобальные объекты (инициализируются здесь, обновляются в initialize_all_systems)
+# Глобальные объекты
 rate_limiter = RateLimiter()
 db = None
 sheets_manager = None
