@@ -51,7 +51,7 @@ user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
-# Главное меню администратора
+# Главное меню администратора (ТОЛЬКО АДМИН-ПАНЕЛЬ)
 admin_main_menu_keyboard = [
     ['👑 Админ-панель']
 ]
@@ -88,10 +88,9 @@ edit_choice_keyboard = [
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
 
-# Админ-панель (УПРОЩЕННАЯ - только новые заявки)
+# Админ-панель (ТОЛЬКО НОВЫЕ ЗАЯВКИ)
 admin_panel_keyboard = [
-    ['🆕 Новые заявки'],
-    ['🔙 Главное меню']
+    ['🆕 Новые заявки']
 ]
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -302,11 +301,8 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
     
     # Определяем клавиатуру в зависимости от прав
     if user_id in ADMIN_CHAT_IDS:
-        keyboard = admin_main_menu_keyboard
-        welcome_text = (
-            "👑 *Администратор завода Контакт*\n\n"
-            "Выберите действие:"
-        )
+        # Администратору показываем сразу админ-панель
+        return show_admin_panel(update, context)
     else:
         keyboard = user_main_menu_keyboard
         welcome_text = (
@@ -331,7 +327,8 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
     
     # Определяем клавиатуру в зависимости от прав
     if user_id in ADMIN_CHAT_IDS:
-        keyboard = admin_main_menu_keyboard
+        # Администратору показываем админ-панель
+        return show_admin_panel(update, context)
     else:
         keyboard = user_main_menu_keyboard
     
@@ -429,7 +426,7 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
 # ==================== АДМИН-ПАНЕЛЬ ====================
 
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    """Показывает упрощенную админ-панель"""
+    """Показывает упрощенную админ-панель только с новыми заявками"""
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
@@ -442,7 +439,7 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
     admin_text = (
         "👑 *Админ-панель завода Контакт*\n\n"
         f"🆕 *Новых заявок:* {len(new_requests)}\n\n"
-        "Выберите действие:"
+        "Нажмите кнопку ниже для просмотра новых заявок:"
     )
     
     update.message.reply_text(
@@ -742,22 +739,19 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
     text = update.message.text
     user_id = update.message.from_user.id
     
-    # Определяем клавиатуру в зависимости от прав
+    # Для администраторов показываем только админ-панель
     if user_id in ADMIN_CHAT_IDS:
-        keyboard = admin_main_menu_keyboard
-    else:
-        keyboard = user_main_menu_keyboard
+        return show_admin_panel(update, context)
     
+    # Для обычных пользователей
     if text == '📝 Создать заявку':
         return start_request_creation(update, context)
     elif text == '📋 Мои заявки':
         return show_my_requests(update, context)
-    elif text == '👑 Админ-панель' and user_id in ADMIN_CHAT_IDS:
-        return show_admin_panel(update, context)
     else:
         update.message.reply_text(
             "Пожалуйста, выберите действие из меню:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
         )
 
 def handle_admin_menu(update: Update, context: CallbackContext) -> None:
@@ -770,8 +764,6 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     
     if text == '🆕 Новые заявки':
         return show_requests_by_filter(update, context, 'new')
-    elif text == '🔙 Главное меню':
-        return show_main_menu(update, context)
 
 # ==================== СОЗДАНИЕ ЗАЯВКИ ====================
 
@@ -1152,15 +1144,18 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
             
             # Определяем клавиатуру в зависимости от прав
             if user.id in ADMIN_CHAT_IDS:
-                keyboard = admin_main_menu_keyboard
+                # Администратору показываем админ-панель
+                update.message.reply_text(
+                    confirmation_text,
+                    reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
             else:
-                keyboard = user_main_menu_keyboard
-            
-            update.message.reply_text(
-                confirmation_text,
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-                parse_mode=ParseMode.MARKDOWN
-            )
+                update.message.reply_text(
+                    confirmation_text,
+                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
             
             logger.info(f"Новая заявка #{request_id} от {user.username}")
             
@@ -1169,15 +1164,17 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
             
             # Определяем клавиатуру в зависимости от прав
             if user.id in ADMIN_CHAT_IDS:
-                keyboard = admin_main_menu_keyboard
+                update.message.reply_text(
+                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
+                    reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
             else:
-                keyboard = user_main_menu_keyboard
-            
-            update.message.reply_text(
-                "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-                parse_mode=ParseMode.MARKDOWN
-            )
+                update.message.reply_text(
+                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
+                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
         
         context.user_data.clear()
         
@@ -1221,17 +1218,20 @@ def send_admin_notification(context: CallbackContext, user_data: Dict, request_i
 
 def cancel_request(update: Update, context: CallbackContext) -> int:
     """Отменяет создание заявки"""
-    # Определяем клавиатуру в зависимости от прав
     user_id = update.message.from_user.id
-    if user_id in ADMIN_CHAT_IDS:
-        keyboard = admin_main_menu_keyboard
-    else:
-        keyboard = user_main_menu_keyboard
     
-    update.message.reply_text(
-        "❌ Создание заявки отменено.",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    if user_id in ADMIN_CHAT_IDS:
+        # Администратору показываем админ-панель
+        update.message.reply_text(
+            "❌ Создание заявки отменено.",
+            reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+        )
+    else:
+        update.message.reply_text(
+            "❌ Создание заявки отменено.",
+            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
+        )
+    
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1304,7 +1304,7 @@ def main() -> None:
         
         # Обработчики упрощенной админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔙 Главное меню)$'), 
+            Filters.regex('^(🆕 Новые заявки)$'), 
             handle_admin_menu
         ))
         
