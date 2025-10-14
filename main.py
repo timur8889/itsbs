@@ -3,8 +3,9 @@ import sqlite3
 import os
 import json
 import re
+import threading
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -12,6 +13,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     ParseMode,
+    InputFile,
 )
 from telegram.ext import (
     Updater,
@@ -26,11 +28,15 @@ from telegram.ext import (
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
-# Безопасное получение токена из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN', "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw")
 ADMIN_CHAT_IDS = [int(x) for x in os.getenv('ADMIN_CHAT_IDS', '5024165375').split(',')]
 
-# Включим логирование
+# Расширенные настройки
+MAX_REQUESTS_PER_HOUR = 15
+BACKUP_RETENTION_DAYS = 30
+AUTO_BACKUP_HOUR = 3
+AUTO_BACKUP_MINUTE = 0
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO,
@@ -41,445 +47,349 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Определяем этапы разговора
+# Этапы разговора (сохраняем старые + добавляем новые)
 NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD = range(9)
 
-# База данных
 DB_PATH = "requests.db"
 BACKUP_DIR = "backups"
-
-# Создаем директорию для бэкапов
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# ==================== УТИЛИТЫ ====================
+# ==================== НОВЫЕ УТИЛИТЫ ====================
 
-class Validators:
-    """Класс для валидации данных"""
+class AdvancedValidators(Validators):
+    """Расширенный класс валидации с сохранением старых методов"""
     
     @staticmethod
-    def validate_phone(phone: str) -> bool:
-        """Валидация российских номеров телефонов"""
-        pattern = r'^(\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}$'
-        return bool(re.match(pattern, phone.strip()))
+    def validate_email(email: str) -> bool:
+        """Валидация email адреса"""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email.strip()))
     
     @staticmethod
-    def validate_name(name: str) -> bool:
-        """Валидация имени (только буквы, пробелы и дефисы)"""
-        pattern = r'^[a-zA-Zа-яА-ЯёЁ\s\-]{2,50}$'
-        return bool(re.match(pattern, name.strip()))
+    def validate_plot_number(plot: str) -> bool:
+        """Валидация номера участка"""
+        return bool(re.match(r'^[А-Яа-яA-Za-z0-9\s\-]{2,20}$', plot.strip()))
     
     @staticmethod
-    def format_phone(phone: str) -> str:
-        """Форматирование телефона в единый формат"""
-        cleaned = re.sub(r'[^\d]', '', phone)
-        if cleaned.startswith('8'):
-            cleaned = '7' + cleaned[1:]
-        return f"+7 ({cleaned[1:4]}) {cleaned[4:7]}-{cleaned[7:9]}-{cleaned[9:11]}"
+    def sanitize_text(text: str) -> str:
+        """Очистка текста от потенциально опасных символов"""
+        return re.sub(r'[<>&\"\']', '', text.strip())
 
-class RateLimiter:
-    """Класс для ограничения частоты запросов"""
+class NotificationManager:
+    """Менеджер уведомлений с расширенными функциями"""
     
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_table()
+    def __init__(self, bot):
+        self.bot = bot
+        self.notification_queue = []
+        self.lock = threading.Lock()
     
-    def init_table(self):
-        """Инициализация таблицы для rate limiting"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS rate_limits (
-                    user_id INTEGER,
-                    action_type TEXT,
-                    timestamp TEXT,
-                    PRIMARY KEY (user_id, action_type)
+    def add_notification(self, chat_id: int, text: str, photo: str = None, 
+                        keyboard: List[List[str]] = None, priority: int = 1):
+        """Добавляет уведомление в очередь"""
+        with self.lock:
+            self.notification_queue.append({
+                'chat_id': chat_id,
+                'text': text,
+                'photo': photo,
+                'keyboard': keyboard,
+                'priority': priority,
+                'timestamp': datetime.now()
+            })
+            # Сортируем по приоритету
+            self.notification_queue.sort(key=lambda x: x['priority'])
+    
+    def send_priority_notification(self, chat_ids: List[int], text: str, 
+                                 parse_mode: str = ParseMode.MARKDOWN):
+        """Отправляет приоритетное уведомление нескольким пользователям"""
+        for chat_id in chat_ids:
+            try:
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=parse_mode
                 )
-            ''')
-            conn.commit()
+                logger.info(f"Приоритетное уведомление отправлено {chat_id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки приоритетного уведомления {chat_id}: {e}")
     
-    def is_limited(self, user_id: int, action_type: str, limit_per_hour: int = 10) -> bool:
-        """Проверяет, превышен ли лимит запросов"""
-        hour_ago = (datetime.now() - timedelta(hours=1)).isoformat()
+    def process_queue(self):
+        """Обрабатывает очередь уведомлений (вызывается периодически)"""
+        with self.lock:
+            for notification in self.notification_queue[:10]:  # Обрабатываем первые 10
+                try:
+                    if notification['photo']:
+                        self.bot.send_photo(
+                            chat_id=notification['chat_id'],
+                            photo=notification['photo'],
+                            caption=notification['text'],
+                            reply_markup=ReplyKeyboardMarkup(
+                                notification['keyboard'], 
+                                resize_keyboard=True
+                            ) if notification['keyboard'] else None,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    else:
+                        self.bot.send_message(
+                            chat_id=notification['chat_id'],
+                            text=notification['text'],
+                            reply_markup=ReplyKeyboardMarkup(
+                                notification['keyboard'], 
+                                resize_keyboard=True
+                            ) if notification['keyboard'] else None,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                    self.notification_queue.remove(notification)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки уведомления: {e}")
+                    # Удаляем проблемное уведомление после 3 попыток
+                    if notification.get('attempts', 0) >= 3:
+                        self.notification_queue.remove(notification)
+                    else:
+                        notification['attempts'] = notification.get('attempts', 0) + 1
+
+class EnhancedBackupManager(BackupManager):
+    """Расширенный менеджер бэкапов"""
+    
+    @staticmethod
+    def create_encrypted_backup(password: str = None):
+        """Создает зашифрованный бэкап (базовая реализация)"""
+        backup_path = BackupManager.create_backup()
+        if backup_path and password:
+            # Здесь может быть реализация шифрования
+            logger.info(f"Бэкап создан: {backup_path} (шифрование отключено)")
+        return backup_path
+    
+    @staticmethod
+    def get_backup_info():
+        """Возвращает информацию о бэкапах"""
+        try:
+            backups = []
+            for f in os.listdir(BACKUP_DIR):
+                if f.startswith('backup_') and f.endswith('.db'):
+                    path = os.path.join(BACKUP_DIR, f)
+                    stats = os.stat(path)
+                    backups.append({
+                        'name': f,
+                        'size': stats.st_size,
+                        'created': datetime.fromtimestamp(stats.st_ctime),
+                        'path': path
+                    })
+            
+            # Сортируем по дате создания
+            backups.sort(key=lambda x: x['created'], reverse=True)
+            return backups
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о бэкапах: {e}")
+            return []
+    
+    @staticmethod
+    def cleanup_old_backups():
+        """Удаляет старые бэкапы"""
+        try:
+            cutoff_date = datetime.now() - timedelta(days=BACKUP_RETENTION_DAYS)
+            backups = EnhancedBackupManager.get_backup_info()
+            
+            deleted_count = 0
+            for backup in backups:
+                if backup['created'] < cutoff_date:
+                    os.remove(backup['path'])
+                    deleted_count += 1
+                    logger.info(f"Удален старый бэкап: {backup['name']}")
+            
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Ошибка очистки бэкапов: {e}")
+            return 0
+
+# ==================== РАСШИРЕННАЯ БАЗА ДАННЫХ ====================
+
+class EnhancedDatabase(Database):
+    """Расширенная база данных с новыми функциями"""
+    
+    def init_db(self):
+        """Инициализация с дополнительными таблицами"""
+        super().init_db()
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            
+            # Таблица для уведомлений
             cursor.execute('''
-                SELECT COUNT(*) FROM rate_limits 
-                WHERE user_id = ? AND action_type = ? AND timestamp > ?
-            ''', (user_id, action_type, hour_ago))
-            count = cursor.fetchone()[0]
-            
-            if count >= limit_per_hour:
-                return True
-            
-            # Записываем текущий запрос
-            cursor.execute('''
-                INSERT OR REPLACE INTO rate_limits (user_id, action_type, timestamp)
-                VALUES (?, ?, ?)
-            ''', (user_id, action_type, datetime.now().isoformat()))
-            conn.commit()
-            
-            return False
-
-class BackupManager:
-    """Класс для управления бэкапами базы данных"""
-    
-    @staticmethod
-    def create_backup():
-        """Создает бэкап базы данных"""
-        try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_path = os.path.join(BACKUP_DIR, f"backup_{timestamp}.db")
-            
-            import shutil
-            shutil.copy2(DB_PATH, backup_path)
-            
-            # Удаляем старые бэкапы (оставляем последние 10)
-            backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith('backup_')])
-            for old_backup in backups[:-10]:
-                os.remove(os.path.join(BACKUP_DIR, old_backup))
-            
-            logger.info(f"Database backed up to {backup_path}")
-            return backup_path
-        except Exception as e:
-            logger.error(f"Backup failed: {e}")
-            return None
-
-# ==================== КЛАВИАТУРЫ ====================
-
-# Главное меню пользователя
-user_main_menu_keyboard = [
-    ['📝 Создать заявку', '📋 Мои заявки']
-]
-
-# Главное меню администратора (ОБНОВЛЕНО - добавлены счетчики)
-admin_main_menu_keyboard = [
-    ['🆕 Новые заявки (0)', '🔄 В работе (0)'],
-    ['✅ Выполненные заявки', '📊 Статистика'],
-    ['🔄 Обновить', '💾 Создать бэкап']
-]
-
-# Меню создания заявки
-create_request_keyboard = [
-    ['📹 Видеонаблюдение', '🔐 СКУД'],
-    ['🌐 Компьютерная сеть', '🚨 Пожарная сигнализация'],
-    ['🔙 Назад в меню']
-]
-
-# Клавиатуры для этапов заявки
-confirm_keyboard = [['✅ Подтвердить отправку', '✏️ Редактировать заявку']]
-photo_keyboard = [['📷 Добавить фото', '⏭️ Пропустить фото']]
-urgency_keyboard = [
-    ['🔴 Срочно (2 часа)'],
-    ['🟡 Средняя (сегодня)'],
-    ['🟢 Не срочно (3 дня)'],
-    ['🔙 Назад']
-]
-plot_type_keyboard = [
-    ['🏭 Фрезерный участок', '⚙️ Токарный участок'],
-    ['🔨 Участок штамповки', '📦 Другой участок'],
-    ['🔙 Назад']
-]
-
-# Клавиатуры для редактирования
-edit_choice_keyboard = [
-    ['📛 Редактировать имя', '📞 Редактировать телефон'],
-    ['📍 Редактировать участок', '🔧 Редактировать систему'],
-    ['📝 Редактировать описание', '⏰ Редактировать срочность'],
-    ['📷 Редактировать фото', '✅ Завершить редактирование']
-]
-
-edit_field_keyboard = [['🔙 Назад к редактированию']]
-
-# ==================== БАЗА ДАННЫХ ====================
-
-class Database:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_db()
-
-    def init_db(self):
-        """Инициализация базы данных"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS requests (
+                CREATE TABLE IF NOT EXISTS notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
-                    username TEXT,
-                    name TEXT,
-                    phone TEXT,
-                    plot TEXT,
-                    system_type TEXT,
-                    problem TEXT,
-                    photo TEXT,
-                    urgency TEXT,
-                    status TEXT DEFAULT 'new',
-                    created_at TEXT,
-                    updated_at TEXT,
-                    admin_comment TEXT,
-                    assigned_admin TEXT
+                    message TEXT,
+                    sent_at TEXT,
+                    is_read INTEGER DEFAULT 0
                 )
             ''')
+            
+            # Таблица настроек
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS statistics (
-                    date TEXT PRIMARY KEY,
-                    requests_count INTEGER DEFAULT 0,
-                    completed_count INTEGER DEFAULT 0
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             ''')
+            
+            # Таблица для истории изменений заявок
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    created_at TEXT,
-                    request_count INTEGER DEFAULT 0
+                CREATE TABLE IF NOT EXISTS request_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id INTEGER,
+                    action TEXT,
+                    old_value TEXT,
+                    new_value TEXT,
+                    changed_by TEXT,
+                    changed_at TEXT,
+                    FOREIGN KEY (request_id) REFERENCES requests (id)
                 )
             ''')
+            
             conn.commit()
-
-    def save_request(self, user_data: Dict) -> int:
-        """Сохраняет заявку в базу данных"""
+    
+    def log_request_change(self, request_id: int, action: str, old_value: str, 
+                          new_value: str, changed_by: str):
+        """Логирует изменения заявки"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO requests 
-                    (user_id, username, name, phone, plot, system_type, problem, photo, urgency, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    user_data.get('user_id'),
-                    user_data.get('username'),
-                    user_data.get('name'),
-                    user_data.get('phone'),
-                    user_data.get('plot'),
-                    user_data.get('system_type'),
-                    user_data.get('problem'),
-                    user_data.get('photo'),
-                    user_data.get('urgency'),
-                    datetime.now().isoformat(),
-                    datetime.now().isoformat()
-                ))
-                request_id = cursor.lastrowid
-                
-                # Обновляем статистику
-                today = datetime.now().strftime('%Y-%m-%d')
-                cursor.execute('''
-                    INSERT OR REPLACE INTO statistics (date, requests_count)
-                    VALUES (?, COALESCE((SELECT requests_count FROM statistics WHERE date = ?), 0) + 1)
-                ''', (today, today))
-                
-                # Обновляем информацию о пользователе
-                cursor.execute('''
-                    INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, request_count)
-                    VALUES (?, ?, ?, ?, ?, COALESCE((SELECT request_count FROM users WHERE user_id = ?), 0) + 1)
-                ''', (
-                    user_data.get('user_id'),
-                    user_data.get('username'),
-                    user_data.get('first_name', ''),
-                    user_data.get('last_name', ''),
-                    datetime.now().isoformat(),
-                    user_data.get('user_id')
-                ))
-                
-                conn.commit()
-                return request_id
-        except sqlite3.Error as e:
-            logger.error(f"Database error in save_request: {e}")
-            raise
-
-    def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict]:
-        """Получает заявки пользователя"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT * FROM requests 
-                    WHERE user_id = ? 
-                    ORDER BY created_at DESC 
-                    LIMIT ?
-                ''', (user_id, limit))
-                columns = [column[0] for column in cursor.description]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            logger.error(f"Database error in get_user_requests: {e}")
-            return []
-
-    def get_requests_by_filter(self, filter_type: str = 'all', limit: int = 50) -> List[Dict]:
-        """Получает заявки по фильтру"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                
-                if filter_type == 'new':
-                    status_filter = "status = 'new'"
-                elif filter_type == 'in_progress':
-                    status_filter = "status = 'in_progress'"
-                elif filter_type == 'urgent':
-                    status_filter = "urgency LIKE '%Срочно%' AND status IN ('new', 'in_progress')"
-                elif filter_type == 'completed':
-                    status_filter = "status = 'completed'"
-                else:  # all active
-                    status_filter = "status IN ('new', 'in_progress')"
-                
-                cursor.execute(f'''
-                    SELECT * FROM requests 
-                    WHERE {status_filter}
-                    ORDER BY 
-                        CASE urgency 
-                            WHEN '🔴 Срочно (2 часа)' THEN 1
-                            WHEN '🟡 Средняя (сегодня)' THEN 2
-                            ELSE 3
-                        END,
-                        created_at DESC
-                    LIMIT ?
-                ''', (limit,))
-                columns = [column[0] for column in cursor.description]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            logger.error(f"Database error in get_requests_by_filter: {e}")
-            return []
-
-    def get_request(self, request_id: int) -> Dict:
-        """Получает заявку по ID"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
-                row = cursor.fetchone()
-                if row:
-                    columns = [column[0] for column in cursor.description]
-                    return dict(zip(columns, row))
-                return {}
-        except sqlite3.Error as e:
-            logger.error(f"Database error in get_request: {e}")
-            return {}
-
-    def update_request_status(self, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
-        """Обновляет статус заявки"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                
-                if admin_comment and assigned_admin:
-                    cursor.execute('''
-                        UPDATE requests SET status = ?, admin_comment = ?, assigned_admin = ?, updated_at = ?
-                        WHERE id = ?
-                    ''', (status, admin_comment, assigned_admin, datetime.now().isoformat(), request_id))
-                elif admin_comment:
-                    cursor.execute('''
-                        UPDATE requests SET status = ?, admin_comment = ?, updated_at = ?
-                        WHERE id = ?
-                    ''', (status, admin_comment, datetime.now().isoformat(), request_id))
-                elif assigned_admin:
-                    cursor.execute('''
-                        UPDATE requests SET status = ?, assigned_admin = ?, updated_at = ?
-                        WHERE id = ?
-                    ''', (status, assigned_admin, datetime.now().isoformat(), request_id))
-                else:
-                    cursor.execute('''
-                        UPDATE requests SET status = ?, updated_at = ? WHERE id = ?
-                    ''', (status, datetime.now().isoformat(), request_id))
-                
-                # Обновляем статистику выполненных заявок
-                if status == 'completed':
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO statistics (date, completed_count)
-                        VALUES (?, COALESCE((SELECT completed_count FROM statistics WHERE date = ?), 0) + 1)
-                    ''', (today, today))
-                
+                    INSERT INTO request_history 
+                    (request_id, action, old_value, new_value, changed_by, changed_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (request_id, action, old_value, new_value, changed_by, 
+                      datetime.now().isoformat()))
                 conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Database error in update_request_status: {e}")
-            raise
-
-    def get_my_in_progress_requests(self, admin_name: str, limit: int = 50) -> List[Dict]:
-        """Получает заявки, которые взял в работу конкретный администратор"""
+            logger.error(f"Ошибка логирования изменения заявки: {e}")
+    
+    def get_request_history(self, request_id: int) -> List[Dict]:
+        """Получает историю изменений заявки"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT * FROM requests 
-                    WHERE assigned_admin = ? AND status = 'in_progress'
-                    ORDER BY 
-                        CASE urgency 
-                            WHEN '🔴 Срочно (2 часа)' THEN 1
-                            WHEN '🟡 Средняя (сегодня)' THEN 2
-                            ELSE 3
-                        END,
-                        created_at DESC
-                    LIMIT ?
-                ''', (admin_name, limit))
+                    SELECT * FROM request_history 
+                    WHERE request_id = ? 
+                    ORDER BY changed_at DESC
+                ''', (request_id,))
                 columns = [column[0] for column in cursor.description]
                 return [dict(zip(columns, row)) for row in cursor.fetchall()]
         except sqlite3.Error as e:
-            logger.error(f"Database error in get_my_in_progress_requests: {e}")
+            logger.error(f"Ошибка получения истории заявки: {e}")
             return []
-
-    def get_statistics(self, days: int = 30) -> Dict:
-        """Получает статистику за указанный период"""
+    
+    def get_urgent_requests(self, hours: int = 2) -> List[Dict]:
+        """Получает срочные заявки с истекающим сроком"""
         try:
-            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            time_threshold = (datetime.now() - timedelta(hours=hours)).isoformat()
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM requests 
+                    WHERE urgency LIKE '%Срочно%' 
+                    AND status IN ('new', 'in_progress')
+                    AND created_at > ?
+                    ORDER BY created_at ASC
+                ''', (time_threshold,))
+                columns = [column[0] for column in cursor.description]
+                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка получения срочных заявок: {e}")
+            return []
+    
+    def get_user_statistics(self, user_id: int) -> Dict:
+        """Получает расширенную статистику пользователя"""
+        try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                # Общая статистика
+                # Основная статистика
                 cursor.execute('''
                     SELECT 
                         COUNT(*) as total_requests,
-                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_requests,
-                        SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new_requests,
-                        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress_requests
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                        SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new,
+                        MIN(created_at) as first_request,
+                        MAX(created_at) as last_request
                     FROM requests 
-                    WHERE created_at > ?
-                ''', (start_date,))
+                    WHERE user_id = ?
+                ''', (user_id,))
                 
                 stats = cursor.fetchone()
-                total, completed, new, in_progress = stats if stats else (0, 0, 0, 0)
-                
-                # Статистика по дням
-                cursor.execute('''
-                    SELECT date, requests_count, completed_count 
-                    FROM statistics 
-                    WHERE date > ? 
-                    ORDER BY date DESC
-                ''', (start_date,))
-                
-                daily_stats = cursor.fetchall()
-                
-                return {
-                    'total': total,
-                    'completed': completed,
-                    'new': new,
-                    'in_progress': in_progress,
-                    'daily': daily_stats
-                }
+                if stats:
+                    columns = [column[0] for column in cursor.description]
+                    result = dict(zip(columns, stats))
+                    
+                    # Среднее время выполнения
+                    cursor.execute('''
+                        SELECT AVG(
+                            (julianday(updated_at) - julianday(created_at)) * 24
+                        ) as avg_hours
+                        FROM requests 
+                        WHERE user_id = ? AND status = 'completed'
+                    ''', (user_id,))
+                    
+                    avg_hours = cursor.fetchone()[0]
+                    result['avg_completion_hours'] = round(avg_hours, 2) if avg_hours else 0
+                    
+                    return result
+                return {}
         except sqlite3.Error as e:
-            logger.error(f"Database error in get_statistics: {e}")
-            return {'total': 0, 'completed': 0, 'new': 0, 'in_progress': 0, 'daily': []}
+            logger.error(f"Ошибка получения статистики пользователя: {e}")
+            return {}
 
-# Инициализация базы данных и утилит
-db = Database(DB_PATH)
-rate_limiter = RateLimiter(DB_PATH)
-validators = Validators()
+# ==================== НОВЫЕ КЛАВИАТУРЫ ====================
 
-# ==================== СОЗДАНИЕ ЗАЯВКИ (УЛУЧШЕННАЯ) ====================
+# Расширенное главное меню пользователя
+enhanced_user_main_menu_keyboard = [
+    ['📝 Создать заявку', '📋 Мои заявки'],
+    ['📊 Моя статистика', '🆘 Срочная помощь']
+]
 
-def start_request_creation(update: Update, context: CallbackContext) -> int:
-    """Начинает процесс создания заявки с проверкой лимитов"""
+# Расширенное админ-меню
+enhanced_admin_main_menu_keyboard = [
+    ['🆕 Новые заявки', '🔄 В работе'],
+    ['⏰ Срочные заявки', '📊 Статистика'],
+    ['👥 Пользователи', '⚙️ Настройки'],
+    ['💾 Бэкапы', '🔄 Обновить']
+]
+
+# Меню настроек
+settings_keyboard = [
+    ['📊 Общая статистика', '🔔 Уведомления'],
+    ['🔄 Авто-обновление', '💾 Управление бэкапами'],
+    ['🔙 Назад в админ-панель']
+]
+
+# Меню бэкапов
+backup_keyboard = [
+    ['💾 Создать бэкап', '📋 Список бэкапов'],
+    ['🧹 Очистить старые', '🔙 Назад']
+]
+
+# ==================== РАСШИРЕННЫЕ ФУНКЦИИ СОЗДАНИЯ ЗАЯВКИ ====================
+
+def enhanced_start_request_creation(update: Update, context: CallbackContext) -> int:
+    """Улучшенное начало создания заявки с проверкой лимитов и статистики"""
     user_id = update.message.from_user.id
     
-    # Проверка лимита запросов
-    if rate_limiter.is_limited(user_id, 'create_request', 10):
+    # Проверка расширенного лимита
+    if rate_limiter.is_limited(user_id, 'create_request', MAX_REQUESTS_PER_HOUR):
+        user_stats = db.get_user_statistics(user_id)
+        
         update.message.reply_text(
             "❌ *Превышен лимит запросов!*\n\n"
-            "Вы можете создавать не более 10 заявок в час.\n"
+            f"📊 *Ваша статистика:*\n"
+            f"• Всего заявок: {user_stats.get('total_requests', 0)}\n"
+            f"• Выполнено: {user_stats.get('completed', 0)}\n"
+            f"• В работе: {user_stats.get('in_progress', 0)}\n\n"
+            "Вы можете создавать не более 15 заявок в час.\n"
             "Пожалуйста, попробуйте позже.",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
         )
         return ConversationHandler.END
     
@@ -490,10 +400,24 @@ def start_request_creation(update: Update, context: CallbackContext) -> int:
         'user_id': user.id,
         'username': user.username,
         'first_name': user.first_name,
-        'last_name': user.last_name
+        'last_name': user.last_name,
+        'creation_started': datetime.now().isoformat()
     })
     
+    # Показываем статистику пользователя
+    user_stats = db.get_user_statistics(user_id)
+    if user_stats.get('total_requests', 0) > 0:
+        stats_text = (
+            f"📊 *Ваша статистика:*\n"
+            f"• Всего заявок: {user_stats['total_requests']}\n"
+            f"• Выполнено: {user_stats['completed']}\n"
+            f"• Среднее время выполнения: {user_stats.get('avg_completion_hours', 0)} ч.\n\n"
+        )
+    else:
+        stats_text = "🎉 *Это ваша первая заявка!*\n\n"
+    
     update.message.reply_text(
+        f"{stats_text}"
         "📝 *Создание новой заявки*\n\n"
         "Для начала укажите ваше имя:",
         reply_markup=ReplyKeyboardRemove(),
@@ -501,255 +425,94 @@ def start_request_creation(update: Update, context: CallbackContext) -> int:
     )
     return NAME
 
-def name(update: Update, context: CallbackContext) -> int:
-    name_text = update.message.text
-    
-    # Валидация имени
-    if not validators.validate_name(name_text):
-        update.message.reply_text(
-            "❌ *Неверный формат имени!*\n\n"
-            "Имя должно содержать только буквы, пробелы и дефисы.\n"
-            "Длина: от 2 до 50 символов.\n\n"
-            "Пожалуйста, введите ваше имя еще раз:",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return NAME
-    
-    context.user_data['name'] = name_text
-    update.message.reply_text(
-        "📞 *Укажите ваш контактный телефон:*\n\n"
-        "Пример: +7 999 123-45-67 или 8 999 123-45-67",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return PHONE
-
-def phone(update: Update, context: CallbackContext) -> int:
-    phone_text = update.message.text
-    
-    # Валидация телефона
-    if not validators.validate_phone(phone_text):
-        update.message.reply_text(
-            "❌ *Неверный формат телефона!*\n\n"
-            "Пожалуйста, введите номер в формате:\n"
-            "+7 999 123-45-67 или 8 999 123-45-67\n\n"
-            "Попробуйте еще раз:",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return PHONE
-    
-    # Форматируем телефон
-    formatted_phone = validators.format_phone(phone_text)
-    context.user_data['phone'] = formatted_phone
-    
-    update.message.reply_text(
-        f"✅ Телефон сохранен: `{formatted_phone}`\n\n"
-        "📍 *Выберите тип участка:*",
-        reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return PLOT
-
-# Остальные функции создания заявки остаются без изменений (plot, system_type, problem, urgency, photo)
-def plot(update: Update, context: CallbackContext) -> int:
-    if update.message.text == '🔙 Назад':
-        update.message.reply_text(
-            "Укажите ваше имя:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return NAME
-    
-    context.user_data['plot'] = update.message.text
-    update.message.reply_text(
-        "🔧 *Выберите тип системы:*",
-        reply_markup=ReplyKeyboardMarkup(create_request_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return SYSTEM_TYPE
-
-def system_type(update: Update, context: CallbackContext) -> int:
-    if update.message.text == '🔙 Назад в меню':
-        return show_main_menu(update, context)
-    elif update.message.text == '🔙 Назад':
-        update.message.reply_text(
-            "📍 *Выберите тип участка:*",
-            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
-        )
-        return PLOT
-    
-    context.user_data['system_type'] = update.message.text
-    update.message.reply_text(
-        "📝 *Опишите проблему или необходимые работы:*\n\nПример: Не работает видеонаблюдение на фрезерном участке",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return PROBLEM
-
-def problem(update: Update, context: CallbackContext) -> int:
-    context.user_data['problem'] = update.message.text
-    update.message.reply_text(
-        "⏰ *Выберите срочность выполнения работ:*",
-        reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return URGENCY
-
-def urgency(update: Update, context: CallbackContext) -> int:
-    if update.message.text == '🔙 Назад':
-        update.message.reply_text(
-            "📝 *Опишите проблему или необходимые работы:*",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return PROBLEM
-    
-    context.user_data['urgency'] = update.message.text
-    update.message.reply_text(
-        "📸 *Хотите добавить фото к заявке?*\n\nФото поможет специалисту лучше понять проблему.",
-        reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return PHOTO
-
-def photo(update: Update, context: CallbackContext) -> int:
-    if update.message.text == '🔙 Назад':
-        update.message.reply_text(
-            "⏰ *Выберите срочность выполнения работ:*",
-            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True)
-        )
-        return URGENCY
-    elif update.message.text == '📷 Добавить фото':
-        update.message.reply_text(
-            "📸 *Отправьте фото:*",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return PHOTO
-    elif update.message.text == '⏭️ Пропустить фото':
-        context.user_data['photo'] = None
-        return show_request_summary(update, context)
-    elif update.message.photo:
-        context.user_data['photo'] = update.message.photo[-1].file_id
-        update.message.reply_text(
-            "✅ Фото добавлено!",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return show_request_summary(update, context)
-    else:
-        update.message.reply_text(
-            "❌ Пожалуйста, отправьте фото или используйте кнопки.",
-            reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True)
-        )
-        return PHOTO
-
-def update_summary(context: CallbackContext) -> None:
-    """Обновляет сводку заявки в user_data"""
-    photo_status = "✅ Есть" if context.user_data.get('photo') else "❌ Нет"
-    
-    summary = (
-        f"📋 *Сводка заявки:*\n\n"
-        f"📛 *Имя:* {context.user_data['name']}\n"
-        f"📞 *Телефон:* `{context.user_data['phone']}`\n"
-        f"📍 *Участок:* {context.user_data['plot']}\n"
-        f"🔧 *Тип системы:* {context.user_data['system_type']}\n"
-        f"📝 *Описание:* {context.user_data['problem']}\n"
-        f"⏰ *Срочность:* {context.user_data['urgency']}\n"
-        f"📸 *Фото:* {photo_status}\n"
-        f"🕒 *Время:* {context.user_data.get('timestamp', 'Не указано')}"
-    )
-    
-    context.user_data['summary'] = summary
-
-def show_request_summary(update: Update, context: CallbackContext) -> int:
-    """Показывает сводку заявки перед отправкой"""
-    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
-    update_summary(context)
-    
-    # Определяем, откуда пришли - из создания или редактирования
-    if context.user_data.get('editing_mode'):
-        # Режим редактирования - показываем меню редактирования
-        return edit_request_choice(update, context)
-    else:
-        # Режим создания - показываем подтверждение
-        if context.user_data.get('photo'):
-            update.message.reply_photo(
-                photo=context.user_data['photo'],
-                caption=f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
-                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            update.message.reply_text(
-                f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
-                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        return ConversationHandler.END
-
-def confirm_request(update: Update, context: CallbackContext) -> None:
-    """Подтверждает и отправляет заявку"""
+def enhanced_confirm_request(update: Update, context: CallbackContext) -> None:
+    """Улучшенное подтверждение заявки с дополнительными проверками"""
     if update.message.text == '✅ Подтвердить отправку':
         user = update.message.from_user
         
         try:
-            # Сохраняем заявку в базу данных
+            # Дополнительная проверка данных
+            required_fields = ['name', 'phone', 'plot', 'system_type', 'problem', 'urgency']
+            for field in required_fields:
+                if field not in context.user_data or not context.user_data[field]:
+                    update.message.reply_text(
+                        f"❌ Отсутствует обязательное поле: {field}",
+                        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
+                    )
+                    return
+            
+            # Сохраняем заявку
             request_id = db.save_request(context.user_data)
             
-            # Отправляем уведомление администраторам
-            send_admin_notification(context, context.user_data, request_id)
+            # Логируем создание
+            db.log_request_change(
+                request_id=request_id,
+                action='created',
+                old_value='',
+                new_value='new',
+                changed_by=f"user_{user.id}"
+            )
             
-            # Подтверждение пользователю
+            # Отправляем уведомления
+            enhanced_send_admin_notification(context, context.user_data, request_id)
+            
+            # Расширенное подтверждение пользователю
+            user_stats = db.get_user_statistics(user.id)
+            
             confirmation_text = (
                 f"✅ *Заявка #{request_id} успешно создана!*\n\n"
                 f"📞 Наш специалист свяжется с вами в ближайшее время.\n"
-                f"⏱️ *Срочность:* {context.user_data['urgency']}\n\n"
+                f"⏱️ *Срочность:* {context.user_data['urgency']}\n"
+                f"📍 *Участок:* {context.user_data['plot']}\n\n"
+                f"📊 *Ваша статистика:* {user_stats.get('total_requests', 0)} заявок "
+                f"({user_stats.get('completed', 0)} выполнено)\n\n"
                 f"_Спасибо за обращение в службу слаботочных систем завода Контакт!_ 🛠️"
             )
             
-            # Определяем клавиатуру в зависимости от прав
+            # Определяем клавиатуру
             if user.id in ADMIN_CHAT_IDS:
-                # Администратору показываем админ-панель
-                update.message.reply_text(
-                    confirmation_text,
-                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                reply_markup = ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True)
             else:
-                update.message.reply_text(
-                    confirmation_text,
-                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                reply_markup = ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
+            
+            update.message.reply_text(
+                confirmation_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
             
             logger.info(f"Новая заявка #{request_id} от {user.username}")
             
         except Exception as e:
             logger.error(f"Ошибка при сохранении заявки: {e}")
             
-            # Определяем клавиатуру в зависимости от прав
+            error_text = (
+                "❌ *Произошла ошибка при создании заявки.*\n\n"
+                "Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+            
             if user.id in ADMIN_CHAT_IDS:
                 update.message.reply_text(
-                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
-                    reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+                    error_text,
+                    reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 update.message.reply_text(
-                    "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
-                    reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True),
+                    error_text,
+                    reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
                     parse_mode=ParseMode.MARKDOWN
                 )
         
         context.user_data.clear()
         
     elif update.message.text == '✏️ Редактировать заявку':
-        # Включаем режим редактирования
         context.user_data['editing_mode'] = True
         return edit_request_choice(update, context)
 
-def send_admin_notification(context: CallbackContext, user_data: Dict, request_id: int) -> None:
-    """Отправляет уведомление администраторам о новой заявке"""
+def enhanced_send_admin_notification(context: CallbackContext, user_data: Dict, request_id: int) -> None:
+    """Расширенное уведомление администраторов"""
+    # Основное уведомление
     notification_text = (
         f"🚨 *НОВАЯ ЗАЯВКА #{request_id}*\n\n"
         f"👤 *Пользователь:* @{user_data.get('username', 'N/A')}\n"
@@ -763,6 +526,10 @@ def send_admin_notification(context: CallbackContext, user_data: Dict, request_i
         f"🕒 *Время:* {user_data.get('timestamp', 'Не указано')}"
     )
     
+    # Уведомление о срочности
+    if '🔴 Срочно' in user_data.get('urgency', ''):
+        notification_text = "🔴🔴🔴 СРОЧНАЯ ЗАЯВКА 🔴🔴🔴\n\n" + notification_text
+    
     for admin_id in ADMIN_CHAT_IDS:
         try:
             if user_data.get('photo'):
@@ -770,199 +537,395 @@ def send_admin_notification(context: CallbackContext, user_data: Dict, request_i
                     chat_id=admin_id,
                     photo=user_data['photo'],
                     caption=notification_text,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{request_id}"),
+                        InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{request_id}")
+                    ]])
                 )
             else:
                 context.bot.send_message(
                     chat_id=admin_id,
                     text=notification_text,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{request_id}"),
+                        InlineKeyboardButton("📋 Подробнее", callback_data=f"view_{request_id}")
+                    ]])
                 )
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления администратору {admin_id}: {e}")
 
-def cancel_request(update: Update, context: CallbackContext) -> int:
-    """Отменяет создание заявки"""
+# ==================== НОВЫЕ КОМАНДЫ ====================
+
+def show_user_statistics(update: Update, context: CallbackContext) -> None:
+    """Показывает статистику пользователя"""
+    user_id = update.message.from_user.id
+    user_stats = db.get_user_statistics(user_id)
+    
+    if not user_stats or user_stats.get('total_requests', 0) == 0:
+        update.message.reply_text(
+            "📊 *Ваша статистика*\n\n"
+            "У вас пока нет созданных заявок.\n\n"
+            "Создайте первую заявку, чтобы начать отслеживать статистику!",
+            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Рассчитываем дополнительные метрики
+    completion_rate = (user_stats['completed'] / user_stats['total_requests']) * 100
+    avg_hours = user_stats.get('avg_completion_hours', 0)
+    
+    stats_text = (
+        "📊 *Ваша статистика заявок*\n\n"
+        f"📈 *Всего заявок:* {user_stats['total_requests']}\n"
+        f"✅ *Выполнено:* {user_stats['completed']}\n"
+        f"🔄 *В работе:* {user_stats.get('in_progress', 0)}\n"
+        f"🆕 *Новых:* {user_stats.get('new', 0)}\n\n"
+        f"📊 *Эффективность:*\n"
+        f"• Процент выполнения: {completion_rate:.1f}%\n"
+        f"• Среднее время выполнения: {avg_hours} часов\n\n"
+    )
+    
+    # Добавляем информацию о первой и последней заявке
+    if user_stats.get('first_request'):
+        first_date = datetime.fromisoformat(user_stats['first_request']).strftime('%d.%m.%Y')
+        stats_text += f"🎉 *Первая заявка:* {first_date}\n"
+    
+    if user_stats.get('last_request'):
+        last_date = datetime.fromisoformat(user_stats['last_request']).strftime('%d.%m.%Y')
+        stats_text += f"📅 *Последняя заявка:* {last_date}\n"
+    
+    update.message.reply_text(
+        stats_text,
+        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def emergency_help(update: Update, context: CallbackContext) -> None:
+    """Экстренная помощь"""
     user_id = update.message.from_user.id
     
-    if user_id in ADMIN_CHAT_IDS:
-        # Администратору показываем админ-панель
-        update.message.reply_text(
-            "❌ Создание заявки отменено.",
-            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
-        )
-    else:
-        update.message.reply_text(
-            "❌ Создание заявки отменено.",
-            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
-        )
+    emergency_text = (
+        "🆘 *Экстренная помощь*\n\n"
+        "Для срочных вопросов и аварийных ситуаций:\n\n"
+        "📞 *Телефон службы поддержки:*\n"
+        "+7 (XXX) XXX-XX-XX\n\n"
+        "👨‍💼 *Ответственный:*\n"
+        "Иванов Иван Иванович\n\n"
+        "📍 *Местоположение службы:*\n"
+        "Главный корпус, кабинет 101\n\n"
+        "⏰ *Режим работы:*\n"
+        "Пн-Пт: 8:00-17:00\n"
+        "Сб: 9:00-15:00\n"
+        "Вс: выходной\n\n"
+        "⚠️ *Для аварийных ситуаций:*\n"
+        "Круглосуточный телефон: +7 (XXX) XXX-XX-XX"
+    )
     
-    context.user_data.clear()
-    return ConversationHandler.END
+    update.message.reply_text(
+        emergency_text,
+        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Уведомляем администраторов об обращении к экстренной помощи
+    admin_notification = (
+        f"🆘 Пользователь @{update.message.from_user.username or 'N/A'} "
+        f"обратился к экстренной помощи"
+    )
+    
+    for admin_id in ADMIN_CHAT_IDS:
+        try:
+            context.bot.send_message(admin_id, admin_notification)
+        except Exception as e:
+            logger.error(f"Ошибка уведомления администратора: {e}")
 
-# ==================== АДМИН-ПАНЕЛЬ (УЛУЧШЕННАЯ) ====================
+# ==================== РАСШИРЕННАЯ АДМИН-ПАНЕЛЬ ====================
 
-def get_admin_panel_with_counters():
-    """Возвращает админ-панель с актуальными счетчиками"""
+def get_enhanced_admin_panel():
+    """Возвращает расширенную админ-панель"""
     new_requests = db.get_requests_by_filter('new')
     in_progress_requests = db.get_requests_by_filter('in_progress')
+    urgent_requests = db.get_urgent_requests()
     
     return [
-        [f'🆕 Новые заявки ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
-        ['✅ Выполненные заявки', '📊 Статистика'],
-        ['🔄 Обновить', '💾 Создать бэкап']
+        [f'🆕 Новые ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
+        [f'⏰ Срочные ({len(urgent_requests)})', '📊 Статистика'],
+        ['👥 Пользователи', '⚙️ Настройки'],
+        ['💾 Бэкапы', '🔄 Обновить']
     ]
 
-def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    """Показывает админ-панель с новыми, в работе и выполненными заявками"""
+def show_enhanced_admin_panel(update: Update, context: CallbackContext) -> None:
+    """Показывает расширенную админ-панель"""
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
         update.message.reply_text("❌ У вас нет доступа к админ-панели.")
         return show_main_menu(update, context)
     
-    # Получаем количество заявок по статусам
-    new_requests = db.get_requests_by_filter('new')
-    in_progress_requests = db.get_requests_by_filter('in_progress')
-    completed_requests = db.get_requests_by_filter('completed')
+    # Получаем расширенную статистику
+    stats = db.get_statistics(7)  # За 7 дней
+    urgent_requests = db.get_urgent_requests()
     
     admin_text = (
-        "👑 *Админ-панель завода Контакт*\n\n"
-        f"🆕 *Новых заявок:* {len(new_requests)}\n"
-        f"🔄 *Заявок в работе:* {len(in_progress_requests)}\n"
-        f"✅ *Выполненных заявок:* {len(completed_requests)}\n\n"
-        "Выберите раздел для просмотра:"
+        "👑 *Расширенная админ-панель завода Контакт*\n\n"
+        f"📊 *За последние 7 дней:*\n"
+        f"• Всего заявок: {stats['total']}\n"
+        f"• Выполнено: {stats['completed']}\n"
+        f"• Новых: {stats['new']}\n"
+        f"• В работе: {stats['in_progress']}\n\n"
+        f"⚠️ *Срочные заявки:* {len(urgent_requests)}\n\n"
+        "Выберите раздел для управления:"
     )
     
     update.message.reply_text(
         admin_text,
-        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
-def show_statistics(update: Update, context: CallbackContext) -> None:
-    """Показывает статистику заявок"""
+def show_users_management(update: Update, context: CallbackContext) -> None:
+    """Управление пользователями"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    stats = db.get_statistics(30)  # Статистика за 30 дней
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, username, first_name, last_name, request_count, created_at
+                FROM users 
+                ORDER BY request_count DESC 
+                LIMIT 50
+            ''')
+            users = cursor.fetchall()
+        
+        if not users:
+            update.message.reply_text(
+                "👥 *Управление пользователями*\n\n"
+                "Пользователей не найдено.",
+                reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        users_text = "👥 *Топ пользователей по количеству заявок:*\n\n"
+        
+        for i, (user_id, username, first_name, last_name, request_count, created_at) in enumerate(users[:10], 1):
+            user_display = username or f"{first_name} {last_name}".strip() or f"ID: {user_id}"
+            users_text += f"{i}. {user_display} - {request_count} заявок\n"
+        
+        users_text += f"\nВсего пользователей: {len(users)}"
+        
+        update.message.reply_text(
+            users_text,
+            reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения списка пользователей: {e}")
+        update.message.reply_text(
+            "❌ Ошибка получения списка пользователей.",
+            reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True)
+        )
+
+def show_settings(update: Update, context: CallbackContext) -> None:
+    """Показывает настройки"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
     
-    # Формируем текст статистики
-    stats_text = (
-        "📊 *Статистика заявок за 30 дней*\n\n"
-        f"📈 *Всего заявок:* {stats['total']}\n"
-        f"✅ *Выполнено:* {stats['completed']}\n"
-        f"🆕 *Новых:* {stats['new']}\n"
-        f"🔄 *В работе:* {stats['in_progress']}\n\n"
+    settings_text = (
+        "⚙️ *Настройки системы*\n\n"
+        f"🤖 *Бот:*\n"
+        f"• Администраторов: {len(ADMIN_CHAT_IDS)}\n"
+        f"• Лимит заявок: {MAX_REQUESTS_PER_HOUR}/час\n"
+        f"• Хранение бэкапов: {BACKUP_RETENTION_DAYS} дней\n\n"
+        f"💾 *База данных:*\n"
+        f"• Путь: {DB_PATH}\n"
+        f"• Размер: {os.path.getsize(DB_PATH) / 1024 / 1024:.2f} МБ\n\n"
+        "Выберите раздел для настройки:"
     )
-    
-    # Добавляем статистику по дням (последние 7 дней)
-    if stats['daily']:
-        stats_text += "*Статистика по дням (последние 7 дней):*\n"
-        for date, requests_count, completed_count in stats['daily'][:7]:
-            formatted_date = datetime.strptime(date, '%Y-%m-%d').strftime('%d.%m')
-            stats_text += f"📅 {formatted_date}: {requests_count} заявок ({completed_count} выполнено)\n"
     
     update.message.reply_text(
-        stats_text,
-        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        settings_text,
+        reply_markup=ReplyKeyboardMarkup(settings_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
-def create_backup_command(update: Update, context: CallbackContext) -> None:
-    """Создает бэкап базы данных"""
+def show_backup_management(update: Update, context: CallbackContext) -> None:
+    """Управление бэкапами"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    backup_path = BackupManager.create_backup()
+    backups = EnhancedBackupManager.get_backup_info()
+    total_size = sum(b['size'] for b in backups) / 1024 / 1024  # в МБ
     
-    if backup_path:
+    backup_text = (
+        "💾 *Управление бэкапами*\n\n"
+        f"📊 *Статистика:*\n"
+        f"• Всего бэкапов: {len(backups)}\n"
+        f"• Общий размер: {total_size:.2f} МБ\n"
+        f"• Авто-очистка: {BACKUP_RETENTION_DAYS} дней\n\n"
+        "Выберите действие:"
+    )
+    
+    update.message.reply_text(
+        backup_text,
+        reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def list_backups(update: Update, context: CallbackContext) -> None:
+    """Показывает список бэкапов"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    backups = EnhancedBackupManager.get_backup_info()
+    
+    if not backups:
         update.message.reply_text(
-            f"✅ *Бэкап создан успешно!*\n\n"
-            f"Файл: `{os.path.basename(backup_path)}`\n"
-            f"Размер: {os.path.getsize(backup_path) / 1024:.1f} КБ",
-            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+            "📋 *Список бэкапов*\n\n"
+            "Бэкапы не найдены.",
+            reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    backups_text = "📋 *Последние 10 бэкапов:*\n\n"
+    
+    for i, backup in enumerate(backups[:10], 1):
+        size_mb = backup['size'] / 1024 / 1024
+        date_str = backup['created'].strftime('%d.%m.%Y %H:%M')
+        backups_text += f"{i}. {backup['name']}\n"
+        backups_text += f"   📅 {date_str} | 💾 {size_mb:.1f} МБ\n\n"
+    
+    update.message.reply_text(
+        backups_text,
+        reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def cleanup_backups(update: Update, context: CallbackContext) -> None:
+    """Очищает старые бэкапы"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    deleted_count = EnhancedBackupManager.cleanup_old_backups()
+    
+    if deleted_count > 0:
+        update.message.reply_text(
+            f"🧹 *Очистка бэкапов*\n\n"
+            f"Удалено {deleted_count} старых бэкапов.",
+            reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
         update.message.reply_text(
-            "❌ *Ошибка создания бэкапа!*\n\nПожалуйста, проверьте логи.",
-            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+            "🧹 *Очистка бэкапов*\n\n"
+            "Старые бэкапы не найдены.",
+            reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
 
-# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ (УЛУЧШЕННЫЕ) ====================
+# ==================== ОБНОВЛЕННЫЕ ОБРАБОТЧИКИ ====================
 
-def handle_main_menu(update: Update, context: CallbackContext) -> None:
-    """Обрабатывает выбор в главном меню"""
+def enhanced_handle_main_menu(update: Update, context: CallbackContext) -> None:
+    """Улучшенный обработчик главного меню"""
     text = update.message.text
     user_id = update.message.from_user.id
     
-    # Для администраторов показываем только админ-панель
     if user_id in ADMIN_CHAT_IDS:
-        return show_admin_panel(update, context)
+        return show_enhanced_admin_panel(update, context)
     
-    # Для обычных пользователей
     if text == '📝 Создать заявку':
-        return start_request_creation(update, context)
+        return enhanced_start_request_creation(update, context)
     elif text == '📋 Мои заявки':
         return show_my_requests(update, context)
+    elif text == '📊 Моя статистика':
+        return show_user_statistics(update, context)
+    elif text == '🆘 Срочная помощь':
+        return emergency_help(update, context)
     else:
         update.message.reply_text(
             "Пожалуйста, выберите действие из меню:",
-            reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
         )
 
-def handle_admin_menu(update: Update, context: CallbackContext) -> None:
-    """Обрабатывает выбор в админ-меню"""
+def enhanced_handle_admin_menu(update: Update, context: CallbackContext) -> None:
+    """Улучшенный обработчик админ-меню"""
     text = update.message.text
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    # ОБНОВЛЕНО: Обработка кнопок с счетчиками
-    if text.startswith('🆕 Новые заявки'):
+    if text.startswith('🆕 Новые'):
         return show_requests_by_filter(update, context, 'new')
     elif text.startswith('🔄 В работе'):
         return show_requests_by_filter(update, context, 'in_progress')
-    elif text == '✅ Выполненные заявки':
-        return show_requests_by_filter(update, context, 'completed')
+    elif text.startswith('⏰ Срочные'):
+        return show_urgent_requests(update, context)
     elif text == '📊 Статистика':
         return show_statistics(update, context)
+    elif text == '👥 Пользователи':
+        return show_users_management(update, context)
+    elif text == '⚙️ Настройки':
+        return show_settings(update, context)
+    elif text == '💾 Бэкапы':
+        return show_backup_management(update, context)
     elif text == '🔄 Обновить':
-        return show_admin_panel(update, context)
-    elif text == '💾 Создать бэкап':
-        return create_backup_command(update, context)
+        return show_enhanced_admin_panel(update, context)
 
-# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
-
-def error_handler(update: Update, context: CallbackContext) -> None:
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+def show_urgent_requests(update: Update, context: CallbackContext) -> None:
+    """Показывает срочные заявки"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
     
-    try:
-        if update and update.effective_message:
-            update.effective_message.reply_text(
-                "❌ *Произошла непредвиденная ошибка!*\n\n"
-                "Пожалуйста, попробуйте еще раз или обратитесь к администратору.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения об ошибке: {e}")
+    urgent_requests = db.get_urgent_requests()
+    
+    if not urgent_requests:
+        update.message.reply_text(
+            "⏰ *Срочные заявки*\n\n"
+            "Срочных заявок не найдено.",
+            reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    text = f"⏰ *Срочные заявки ({len(urgent_requests)}):*\n\n"
+    
+    for req in urgent_requests[:10]:
+        created_time = datetime.fromisoformat(req['created_at'])
+        time_diff = datetime.now() - created_time
+        hours_passed = time_diff.total_seconds() / 3600
+        
+        text += (
+            f"🔴 *Заявка #{req['id']}*\n"
+            f"📍 {req['plot']} | {req['system_type']}\n"
+            f"⏰ Прошло: {hours_passed:.1f} ч.\n"
+            f"👤 {req['name']} | 📞 {req['phone']}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+        )
+    
+    update.message.reply_text(
+        text,
+        reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-def backup_job(context: CallbackContext) -> None:
-    """Ежедневное автоматическое создание бэкапа"""
-    backup_path = BackupManager.create_backup()
-    if backup_path:
-        logger.info(f"Автоматический бэкап создан: {backup_path}")
-    else:
-        logger.error("Ошибка автоматического бэкапа")
+# ==================== ОБНОВЛЕННЫЙ ЗАПУСК ====================
 
-def main() -> None:
-    """Запускаем бота"""
+def enhanced_main() -> None:
+    """Улучшенный запуск бота"""
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("❌ Токен бота не установлен! Замените BOT_TOKEN на реальный токен.")
         return
@@ -971,18 +934,48 @@ def main() -> None:
         updater = Updater(BOT_TOKEN)
         dispatcher = updater.dispatcher
 
-        # Добавляем обработчик ошибок
+        # Инициализация расширенных компонентов
+        global db, notification_manager
+        db = EnhancedDatabase(DB_PATH)
+        notification_manager = NotificationManager(updater.bot)
+
+        # Обработчик ошибок
         dispatcher.add_error_handler(error_handler)
 
-        # Настраиваем ежедневное создание бэкапов в 3:00
+        # Расширенные задания по расписанию
         job_queue = updater.job_queue
         if job_queue:
-            job_queue.run_daily(backup_job, time=datetime.time(hour=3, minute=0))
+            # Ежедневное резервное копирование
+            job_queue.run_daily(
+                backup_job, 
+                time=datetime.time(hour=AUTO_BACKUP_HOUR, minute=AUTO_BACKUP_MINUTE)
+            )
+            
+            # Ежечасная проверка срочных заявок
+            job_queue.run_repeating(
+                check_urgent_requests, 
+                interval=3600,  # 1 час
+                first=10
+            )
+            
+            # Обработка очереди уведомлений каждые 30 секунд
+            job_queue.run_repeating(
+                lambda context: notification_manager.process_queue(),
+                interval=30,
+                first=5
+            )
+            
+            # Еженедельная очистка старых бэкапов
+            job_queue.run_repeating(
+                lambda context: EnhancedBackupManager.cleanup_old_backups(),
+                interval=604800,  # 7 дней
+                first=3600
+            )
 
-        # Обработчик создания заявки
+        # Обработчик создания заявки (сохраняем старый)
         conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(Filters.regex('^(📝 Создать заявку)$'), start_request_creation),
+                MessageHandler(Filters.regex('^(📝 Создать заявку)$'), enhanced_start_request_creation),
             ],
             states={
                 NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
@@ -1009,48 +1002,119 @@ def main() -> None:
             allow_reentry=True
         )
 
-        # Отдельный обработчик для кнопки редактирования заявки
-        edit_handler = MessageHandler(
-            Filters.regex('^(✏️ Редактировать заявку)$'), 
-            confirm_request
-        )
-
         # Регистрируем обработчики
         dispatcher.add_handler(CommandHandler('start', show_main_menu))
         dispatcher.add_handler(CommandHandler('menu', show_main_menu))
-        dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
+        dispatcher.add_handler(CommandHandler('admin', show_enhanced_admin_panel))
         dispatcher.add_handler(CommandHandler('stats', show_statistics))
         dispatcher.add_handler(CommandHandler('backup', create_backup_command))
+        dispatcher.add_handler(CommandHandler('mystats', show_user_statistics))
+        dispatcher.add_handler(CommandHandler('help', emergency_help))
         
         dispatcher.add_handler(conv_handler)
-        dispatcher.add_handler(edit_handler)
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
+        
+        # Обработчик подтверждения заявки
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(✅ Подтвердить отправку)$'), 
+            enhanced_confirm_request
+        ))
         
         # Обработчики главного меню
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки)$'), handle_main_menu))
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📝 Создать заявку|📋 Мои заявки|📊 Моя статистика|🆘 Срочная помощь)$'), 
+            enhanced_handle_main_menu
+        ))
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔄 Обновить|💾 Создать бэкап)'), 
-            handle_admin_menu
+            Filters.regex('^(🆕 Новые|🔄 В работе|⏰ Срочные|📊 Статистика|👥 Пользователи|⚙️ Настройки|💾 Бэкапы|🔄 Обновить)'), 
+            enhanced_handle_admin_menu
+        ))
+        
+        # Обработчики настроек
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(📊 Общая статистика|🔔 Уведомления|🔄 Авто-обновление|💾 Управление бэкапами|🔙 Назад в админ-панель)$'),
+            lambda update, context: handle_settings(update, context)
+        ))
+        
+        # Обработчики бэкапов
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(💾 Создать бэкап|📋 Список бэкапов|🧹 Очистить старые|🔙 Назад)$'),
+            lambda update, context: handle_backup_commands(update, context)
         ))
         
         # Обработчики callback для админ-панели
         dispatcher.add_handler(CallbackQueryHandler(
             handle_admin_callback, 
-            pattern='^(take_|complete_|message_|confirm_take_|cancel_take_|confirm_complete_|cancel_complete_)'
+            pattern='^(take_|complete_|message_|confirm_take_|cancel_take_|confirm_complete_|cancel_complete_|view_|back_)'
         ))
 
         # Запускаем бота
-        logger.info("🤖 Бот запущен с улучшенной функциональностью!")
-        logger.info(f"👑 Администраторы: {ADMIN_CHAT_IDS}")
-        logger.info(f"💾 Автоматические бэкапы: включены")
+        logger.info("🤖 Улучшенный бот запущен с расширенными функциями!")
+        logger.info(f"👑 Администраторы: {len(ADMIN_CHAT_IDS)}")
+        logger.info(f"💾 Автоматические бэкапы: {AUTO_BACKUP_HOUR}:{AUTO_BACKUP_MINUTE:02d}")
+        logger.info(f"📊 Лимит заявок: {MAX_REQUESTS_PER_HOUR}/час")
         
         updater.start_polling()
         updater.idle()
 
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска бота: {e}")
+        logger.error(f"❌ Ошибка запуска улучшенного бота: {e}")
+
+def check_urgent_requests(context: CallbackContext):
+    """Проверяет срочные заявки и отправляет напоминания"""
+    try:
+        urgent_requests = db.get_urgent_requests()
+        
+        for request in urgent_requests:
+            if request['status'] == 'new':
+                # Уведомление о невзятых срочных заявках
+                notification_text = (
+                    f"⏰ *Напоминание о срочной заявке #{request['id']}*\n\n"
+                    f"Заявка ожидает взятия в работу более 1 часа!\n"
+                    f"📍 {request['plot']} | {request['system_type']}\n"
+                    f"👤 {request['name']} | 📞 {request['phone']}"
+                )
+                
+                notification_manager.send_priority_notification(
+                    ADMIN_CHAT_IDS,
+                    notification_text
+                )
+                
+    except Exception as e:
+        logger.error(f"Ошибка проверки срочных заявок: {e}")
+
+def handle_settings(update: Update, context: CallbackContext):
+    """Обрабатывает команды настроек"""
+    text = update.message.text
+    
+    if text == '🔙 Назад в админ-панель':
+        return show_enhanced_admin_panel(update, context)
+    elif text == '💾 Управление бэкапами':
+        return show_backup_management(update, context)
+    # Добавьте обработку других настроек по необходимости
+
+def handle_backup_commands(update: Update, context: CallbackContext):
+    """Обрабатывает команды управления бэкапами"""
+    text = update.message.text
+    
+    if text == '🔙 Назад':
+        return show_settings(update, context)
+    elif text == '💾 Создать бэкап':
+        return create_backup_command(update, context)
+    elif text == '📋 Список бэкапов':
+        return list_backups(update, context)
+    elif text == '🧹 Очистить старые':
+        return cleanup_backups(update, context)
+
+# Сохраняем старые функции для обратной совместимости
+def show_main_menu(update: Update, context: CallbackContext) -> None:
+    """Совместимость со старым кодом"""
+    return enhanced_handle_main_menu(update, context)
+
+def start_request_creation(update: Update, context: CallbackContext) -> int:
+    """Совместимость со старым кодом"""
+    return enhanced_start_request_creation(update, context)
 
 if __name__ == '__main__':
-    main()
+    enhanced_main()
