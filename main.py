@@ -28,6 +28,10 @@ from oauth2client.service_account import ServiceAccountCredentials
 import threading
 import time
 
+# Чтение ключа из переменной окружения
+service_account_info = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'])
+creds = Credentials.from_service_account_info(service_account_info)
+client = gspread.authorize(creds)
 # Включим логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
