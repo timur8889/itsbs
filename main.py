@@ -27,7 +27,7 @@ from telegram.ext import (
 from oauth2client.service_account import ServiceAccountCredentials
 import threading
 import time
-)
+
 from dotenv import load_dotenv
 load_dotenv()
 
