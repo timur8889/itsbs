@@ -1022,7 +1022,7 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
                     InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
                 ]]
         else:
-            # Для новых заявок
+            # Для новых заявки
             keyboard = [[
                 InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}"),
                 InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
@@ -1176,42 +1176,69 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         # Отправляем подтверждение администратору
         query.answer("✅ Заявка выполнена!")
     
-    # УДАЛЕНЫ БЛОКИ ОБРАБОТКИ call_ и copy_ ТАК КАК КНОПКИ "ПОЗВОНИТЬ" УДАЛЕНЫ
-    
     elif data.startswith('message_'):
         request_id = int(data.split('_')[1])
         request = db.get_request(request_id)
         
         if request:
-            # Очищаем номер телефона для Telegram
-            phone_number = request['phone'].replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
-            
-            # Убираем + для Telegram
-            telegram_number = phone_number.replace('+', '')
-            
-            # Создаем кнопку для написания сообщения в Telegram
-            message_button = InlineKeyboardButton(
-                "💬 Написать в Telegram", 
-                url=f"https://t.me/{telegram_number}"
-            )
+            # Получаем информацию о пользователе из базы данных
+            user_info = ""
+            if request.get('username'):
+                user_info = f"💬 *Username:* @{request['username']}\n"
             
             contact_text = (
                 f"💬 *Контактная информация по заявке #{request_id}*\n\n"
                 f"👤 *Клиент:* {request['name']}\n"
                 f"📞 *Телефон:* `{request['phone']}`\n"
+                f"{user_info}"
                 f"📍 *Участок:* {request['plot']}\n"
                 f"🔧 *Тип системы:* {request['system_type']}\n"
                 f"⏰ *Срочность:* {request['urgency']}\n\n"
-                f"_Нажмите кнопку ниже для написания сообщения в Telegram_"
             )
             
-            query.answer("💬 Открывается чат...")
+            # Создаем кнопки для контакта
+            keyboard_buttons = []
             
-            # Отправляем отдельное сообщение с кнопкой для сообщения
+            # Кнопка для поиска по номеру телефона в Telegram
+            if request.get('phone'):
+                # Очищаем номер телефона
+                clean_phone = request['phone'].replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+                # Убираем + для поиска
+                search_phone = clean_phone.replace('+', '')
+                
+                # Добавляем кнопку поиска в Telegram
+                keyboard_buttons.append([
+                    InlineKeyboardButton(
+                        "🔍 Найти в Telegram по номеру", 
+                        url=f"https://t.me/search?query={search_phone}"
+                    )
+                ])
+            
+            # Если есть username, добавляем кнопку прямого сообщения
+            if request.get('username'):
+                keyboard_buttons.append([
+                    InlineKeyboardButton(
+                        "💬 Написать в Telegram", 
+                        url=f"https://t.me/{request['username']}"
+                    )
+                ])
+            else:
+                # Если username нет, показываем инструкцию
+                contact_text += (
+                    "_Для связи с клиентом:_\n"
+                    "1. *Скопируйте номер телефона выше*\n"
+                    "2. *Нажмите кнопку '🔍 Найти в Telegram по номеру'*\n"
+                    "3. *Или найдите номер вручную в поиске Telegram*\n\n"
+                    "_Если у клиента нет аккаунта Telegram, свяжитесь по телефону_"
+                )
+            
+            query.answer("💬 Открывается поиск контакта...")
+            
+            # Отправляем отдельное сообщение с кнопками для связи
             context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=contact_text,
-                reply_markup=InlineKeyboardMarkup([[message_button]]),
+                reply_markup=InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None,
                 parse_mode=ParseMode.MARKDOWN
             )
 
