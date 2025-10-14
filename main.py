@@ -2,8 +2,6 @@ import logging
 import sqlite3
 import os
 import json
-import csv
-import gspread
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from telegram import (
@@ -24,12 +22,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     JobQueue,
 )
-from oauth2client.service_account import ServiceAccountCredentials
-import threading
-import time
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # Включим логирование
 logging.basicConfig(
@@ -46,16 +38,6 @@ logger = logging.getLogger(__name__)
 ADMIN_CHAT_IDS = [5024165375]  # Замените на реальные chat_id админов
 BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на реальный токен бота
 
-# Настройки Google Sheets
-GOOGLE_SHEETS_CONFIG = {
-    'enabled': True,  # Включить автоматическую синхронизацию
-    'spreadsheet_name': 'Заявки слаботочных систем',
-    'credentials_file': 'credentials.json',  # Файл с учетными данными
-    'worksheet_name': 'Заявки',
-    'sync_interval': 30,  # Интервал синхронизации в секундах
-    'auto_sync': True  # Автоматическая синхронизация при изменениях
-}
-
 # Определяем этапы разговора
 NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD = range(9)
 
@@ -69,25 +51,17 @@ user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
-# Главное меню администратора
+# Главное меню администратора (ОБНОВЛЕНО - добавлены счетчики)
 admin_main_menu_keyboard = [
     ['🆕 Новые заявки (0)', '🔄 В работе (0)'],
     ['✅ Выполненные заявки', '📊 Статистика'],
-    ['🔧 Управление', '📊 Excel онлайн']
+    ['🔧 Управление']
 ]
 
 # Меню управления для админов
 admin_management_keyboard = [
     ['📢 Сделать рассылку', '🔄 Обновить счетчики'],
-    ['📁 Экспорт заявок', '🔄 Синхронизировать с Excel'],
-    ['🔙 Назад в админ-панель']
-]
-
-# Меню Excel онлайн
-excel_online_keyboard = [
-    ['🔄 Обновить данные', '📊 Статистика Excel'],
-    ['⚙️ Настройки Excel', '📋 Просмотреть Excel'],
-    ['🔙 Назад в админ-панель']
+    ['📁 Экспорт заявок', '🔙 Назад в админ-панель']
 ]
 
 # Меню создания заявки
@@ -98,7 +72,7 @@ create_request_keyboard = [
 ]
 
 # Клавиатуры для этапов заявки
-confirm_keyboard = [['✅ Подтвердить отправку', '✏️ Редактировать заявку']]
+confirm_keyboard = [['✅ Подтвердить отправку', ✏️ Редактировать заявку']]
 photo_keyboard = [['📷 Добавить фото', '⏭️ Пропустить фото']]
 urgency_keyboard = [
     ['🔴 Срочно (2 часа)'],
@@ -121,242 +95,6 @@ edit_choice_keyboard = [
 ]
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
-
-# ==================== GOOGLE SHEETS ИНТЕГРАЦИЯ ====================
-
-class GoogleSheetsManager:
-    def __init__(self, config: Dict):
-        self.config = config
-        self.sheet = None
-        self.connected = False
-        self.last_sync = None
-        self.sync_in_progress = False
-        self.init_sheets()
-
-    def init_sheets(self):
-        """Инициализация подключения к Google Sheets"""
-        if not self.config['enabled']:
-            logger.info("📊 Google Sheets отключен в настройках")
-            return
-
-        try:
-            if not os.path.exists(self.config['credentials_file']):
-                logger.error(f"❌ Файл учетных данных {self.config['credentials_file']} не найден")
-                self._create_sample_credentials()
-                return
-
-            # Авторизация
-            scope = ['https://spreadsheets.google.com/feeds', 
-                    'https://www.googleapis.com/auth/drive']
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                self.config['credentials_file'], scope)
-            client = gspread.authorize(creds)
-
-            # Открытие таблицы
-            try:
-                self.sheet = client.open(self.config['spreadsheet_name']).worksheet(
-                    self.config['worksheet_name'])
-            except gspread.SpreadsheetNotFound:
-                # Создаем новую таблицу
-                self.sheet = client.create(self.config['spreadsheet_name'])
-                self.sheet = self.sheet.sheet1
-                self.sheet.update_title(self.config['worksheet_name'])
-                # Создаем заголовки
-                self._create_headers()
-            except gspread.WorksheetNotFound:
-                # Создаем новый лист
-                self.sheet = client.open(self.config['spreadsheet_name']).add_worksheet(
-                    title=self.config['worksheet_name'], rows=1000, cols=20)
-                self._create_headers()
-
-            self.connected = True
-            logger.info("✅ Google Sheets подключен успешно")
-            
-            # Запускаем фоновую синхронизацию
-            self._start_background_sync()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
-            self.connected = False
-
-    def _create_sample_credentials(self):
-        """Создает пример файла credentials.json"""
-        sample_credentials = {
-            "type": "service_account",
-            "project_id": "your-project-id",
-            "private_key_id": "your-private-key-id",
-            "private_key": "-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n",
-            "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
-            "client_id": "your-client-id",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
-        }
-        
-        with open('credentials_sample.json', 'w', encoding='utf-8') as f:
-            json.dump(sample_credentials, f, indent=2)
-        
-        logger.info("📝 Создан пример файла credentials_sample.json. Замените его на реальные учетные данные.")
-
-    def _create_headers(self):
-        """Создает заголовки таблицы"""
-        headers = [
-            'ID', 'Статус', 'Срочность', 'Имя', 'Телефон', 'Участок',
-            'Тип системы', 'Описание проблемы', 'Фото', 'Username',
-            'Исполнитель', 'Комментарий', 'Дата создания', 'Дата обновления',
-            'User ID'
-        ]
-        self.sheet.update('A1:O1', [headers])
-        logger.info("✅ Заголовки Google Sheets созданы")
-
-    def _start_background_sync(self):
-        """Запускает фоновую синхронизацию"""
-        if not self.config['auto_sync']:
-            return
-            
-        def sync_worker():
-            while True:
-                try:
-                    if self.connected:
-                        self.sync_all_requests()
-                    time.sleep(self.config['sync_interval'])
-                except Exception as e:
-                    logger.error(f"❌ Ошибка в фоновой синхронизации: {e}")
-                    time.sleep(60)  # Ждем минуту при ошибке
-
-        thread = threading.Thread(target=sync_worker, daemon=True)
-        thread.start()
-        logger.info("✅ Фоновая синхронизация запущена")
-
-    def sync_all_requests(self):
-        """Синхронизирует все заявки с Google Sheets"""
-        if not self.connected or self.sync_in_progress:
-            return
-
-        self.sync_in_progress = True
-        try:
-            # Получаем все заявки из базы
-            db = Database(DB_PATH)
-            requests = db.get_all_requests_for_sync()
-            
-            if not requests:
-                return
-
-            # Подготавливаем данные
-            data = []
-            for req in requests:
-                row = [
-                    req['id'],
-                    req['status'],
-                    req['urgency'],
-                    req['name'],
-                    req['phone'],
-                    req['plot'],
-                    req['system_type'],
-                    req['problem'],
-                    '✅' if req['photo'] else '❌',
-                    req.get('username', ''),
-                    req.get('assigned_admin', ''),
-                    req.get('admin_comment', ''),
-                    req['created_at'],
-                    req.get('updated_at', req['created_at']),
-                    req['user_id']
-                ]
-                data.append(row)
-
-            # Очищаем старые данные (кроме заголовка)
-            self.sheet.clear()
-            self._create_headers()
-            
-            # Добавляем новые данные
-            if data:
-                self.sheet.update(f'A2:O{len(data) + 1}', data)
-            
-            self.last_sync = datetime.now()
-            logger.info(f"✅ Синхронизировано {len(data)} заявок с Google Sheets")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка синхронизации с Google Sheets: {e}")
-        finally:
-            self.sync_in_progress = False
-
-    def sync_single_request(self, request_data: Dict):
-        """Синхронизирует одну заявку в реальном времени"""
-        if not self.connected or not self.config['auto_sync']:
-            return
-
-        try:
-            # Находим строку с этой заявкой
-            all_records = self.sheet.get_all_records()
-            row_index = None
-            
-            for i, record in enumerate(all_records, start=2):  # start=2 потому что заголовок в 1 строке
-                if str(record.get('ID', '')) == str(request_data['id']):
-                    row_index = i
-                    break
-
-            # Подготавливаем данные строки
-            row_data = [
-                request_data['id'],
-                request_data['status'],
-                request_data['urgency'],
-                request_data['name'],
-                request_data['phone'],
-                request_data['plot'],
-                request_data['system_type'],
-                request_data['problem'],
-                '✅' if request_data['photo'] else '❌',
-                request_data.get('username', ''),
-                request_data.get('assigned_admin', ''),
-                request_data.get('admin_comment', ''),
-                request_data['created_at'],
-                request_data.get('updated_at', request_data['created_at']),
-                request_data['user_id']
-            ]
-
-            if row_index:
-                # Обновляем существующую строку
-                self.sheet.update(f'A{row_index}:O{row_index}', [row_data])
-                logger.info(f"✅ Обновлена заявка #{request_data['id']} в Google Sheets")
-            else:
-                # Добавляем новую строку
-                self.sheet.append_row(row_data)
-                logger.info(f"✅ Добавлена заявка #{request_data['id']} в Google Sheets")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка синхронизации заявки #{request_data['id']}: {e}")
-
-    def get_sheet_stats(self) -> Dict:
-        """Получает статистику из Google Sheets"""
-        if not self.connected:
-            return {'error': 'Google Sheets не подключен'}
-        
-        try:
-            all_records = self.sheet.get_all_records()
-            
-            stats = {
-                'total_rows': len(all_records),
-                'last_sync': self.last_sync.strftime('%d.%m.%Y %H:%M') if self.last_sync else 'Никогда',
-                'new_count': len([r for r in all_records if r.get('Статус') == 'new']),
-                'in_progress_count': len([r for r in all_records if r.get('Статус') == 'in_progress']),
-                'completed_count': len([r for r in all_records if r.get('Статус') == 'completed']),
-                'urgent_count': len([r for r in all_records if 'Срочно' in str(r.get('Срочность', ''))])
-            }
-            return stats
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения статистики из Google Sheets: {e}")
-            return {'error': str(e)}
-
-    def get_sheet_url(self) -> str:
-        """Возвращает URL Google Sheets"""
-        if not self.connected:
-            return "Google Sheets не подключен"
-        return f"https://docs.google.com/spreadsheets/d/{self.sheet.spreadsheet.id}"
-
-# Инициализация Google Sheets
-sheets_manager = GoogleSheetsManager(GOOGLE_SHEETS_CONFIG)
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -385,8 +123,7 @@ class Database:
                     created_at TEXT,
                     updated_at TEXT,
                     admin_comment TEXT,
-                    assigned_admin TEXT,
-                    synced_with_sheets INTEGER DEFAULT 0
+                    assigned_admin TEXT
                 )
             ''')
             cursor.execute('''
@@ -408,9 +145,9 @@ class Database:
                 )
             ''')
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS sheets_sync (
-                    last_sync_time TEXT,
-                    total_synced INTEGER DEFAULT 0
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             ''')
             conn.commit()
@@ -460,79 +197,7 @@ class Database:
             ))
             
             conn.commit()
-            
-            # Синхронизируем с Google Sheets в реальном времени
-            self._sync_request_to_sheets(request_id)
-            
             return request_id
-
-    def _sync_request_to_sheets(self, request_id: int):
-        """Синхронизирует заявку с Google Sheets"""
-        try:
-            request = self.get_request(request_id)
-            if request:
-                sheets_manager.sync_single_request(request)
-                
-                # Помечаем как синхронизированную
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE requests SET synced_with_sheets = 1 WHERE id = ?
-                    ''', (request_id,))
-                    conn.commit()
-                    
-        except Exception as e:
-            logger.error(f"❌ Ошибка синхронизации заявки #{request_id}: {e}")
-
-    def update_request_status(self, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
-        """Обновляет статус заявки"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            if admin_comment and assigned_admin:
-                cursor.execute('''
-                    UPDATE requests SET status = ?, admin_comment = ?, assigned_admin = ?, updated_at = ?, synced_with_sheets = 0
-                    WHERE id = ?
-                ''', (status, admin_comment, assigned_admin, datetime.now().isoformat(), request_id))
-            elif admin_comment:
-                cursor.execute('''
-                    UPDATE requests SET status = ?, admin_comment = ?, updated_at = ?, synced_with_sheets = 0
-                    WHERE id = ?
-                ''', (status, admin_comment, datetime.now().isoformat(), request_id))
-            elif assigned_admin:
-                cursor.execute('''
-                    UPDATE requests SET status = ?, assigned_admin = ?, updated_at = ?, synced_with_sheets = 0
-                    WHERE id = ?
-                ''', (status, assigned_admin, datetime.now().isoformat(), request_id))
-            else:
-                cursor.execute('''
-                    UPDATE requests SET status = ?, updated_at = ?, synced_with_sheets = 0 WHERE id = ?
-                ''', (status, datetime.now().isoformat(), request_id))
-            
-            conn.commit()
-            
-            # Синхронизируем с Google Sheets в реальном времени
-            self._sync_request_to_sheets(request_id)
-
-    def get_all_requests_for_sync(self) -> List[Dict]:
-        """Получает все заявки для синхронизации"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM requests ORDER BY created_at DESC
-            ''')
-            columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-    def get_unsynced_requests(self) -> List[Dict]:
-        """Получает несинхронизированные заявки"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM requests WHERE synced_with_sheets = 0 ORDER BY created_at DESC
-            ''')
-            columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict]:
         """Получает заявки пользователя"""
@@ -588,6 +253,33 @@ class Database:
                 columns = [column[0] for column in cursor.description]
                 return dict(zip(columns, row))
             return {}
+
+    def update_request_status(self, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
+        """Обновляет статус заявки"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            if admin_comment and assigned_admin:
+                cursor.execute('''
+                    UPDATE requests SET status = ?, admin_comment = ?, assigned_admin = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (status, admin_comment, assigned_admin, datetime.now().isoformat(), request_id))
+            elif admin_comment:
+                cursor.execute('''
+                    UPDATE requests SET status = ?, admin_comment = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (status, admin_comment, datetime.now().isoformat(), request_id))
+            elif assigned_admin:
+                cursor.execute('''
+                    UPDATE requests SET status = ?, assigned_admin = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (status, assigned_admin, datetime.now().isoformat(), request_id))
+            else:
+                cursor.execute('''
+                    UPDATE requests SET status = ?, updated_at = ? WHERE id = ?
+                ''', (status, datetime.now().isoformat(), request_id))
+            
+            conn.commit()
 
     def get_my_in_progress_requests(self, admin_name: str, limit: int = 50) -> List[Dict]:
         """Получает заявки, которые взял в работу конкретный администратор"""
@@ -690,192 +382,7 @@ class Database:
 # Инициализация базы данных
 db = Database(DB_PATH)
 
-# ==================== ФУНКЦИИ ДЛЯ EXCEL ONLINE ====================
-
-def show_excel_online(update: Update, context: CallbackContext) -> None:
-    """Показывает меню Excel онлайн"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    excel_text = (
-        "📊 *Excel Online - Панель управления*\n\n"
-        "Здесь вы можете управлять синхронизацией с Google Sheets\n\n"
-    )
-    
-    # Добавляем информацию о статусе
-    if sheets_manager.connected:
-        stats = sheets_manager.get_sheet_stats()
-        if 'error' not in stats:
-            excel_text += (
-                f"✅ *Google Sheets подключен*\n"
-                f"📊 Всего строк: {stats['total_rows']}\n"
-                f"🔄 Последняя синхронизация: {stats['last_sync']}\n"
-                f"📎 Ссылка: {sheets_manager.get_sheet_url()}\n\n"
-            )
-        else:
-            excel_text += f"❌ Ошибка: {stats['error']}\n\n"
-    else:
-        excel_text += "❌ *Google Sheets не подключен*\n\n"
-    
-    excel_text += "Выберите действие:"
-    
-    update.message.reply_text(
-        excel_text,
-        reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-def sync_with_excel(update: Update, context: CallbackContext) -> None:
-    """Синхронизирует все данные с Excel"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    if not sheets_manager.connected:
-        update.message.reply_text(
-            "❌ Google Sheets не подключен. Проверьте настройки.",
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-        )
-        return
-    
-    update.message.reply_text(
-        "🔄 Начинаю синхронизацию с Google Sheets...",
-        reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-    )
-    
-    # Запускаем синхронизацию в отдельном потоке
-    def sync_thread():
-        try:
-            sheets_manager.sync_all_requests()
-            context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text="✅ Синхронизация с Google Sheets завершена успешно!",
-                reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-            )
-        except Exception as e:
-            context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=f"❌ Ошибка синхронизации: {e}",
-                reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-            )
-    
-    threading.Thread(target=sync_thread).start()
-
-def show_excel_stats(update: Update, context: CallbackContext) -> None:
-    """Показывает статистику Excel"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    if not sheets_manager.connected:
-        update.message.reply_text(
-            "❌ Google Sheets не подключен",
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-        )
-        return
-    
-    stats = sheets_manager.get_sheet_stats()
-    
-    if 'error' in stats:
-        update.message.reply_text(
-            f"❌ Ошибка: {stats['error']}",
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-        )
-        return
-    
-    stats_text = (
-        "📊 *Статистика Google Sheets*\n\n"
-        f"📋 Всего заявок: {stats['total_rows']}\n"
-        f"🆕 Новых: {stats['new_count']}\n"
-        f"🔄 В работе: {stats['in_progress_count']}\n"
-        f"✅ Выполнено: {stats['completed_count']}\n"
-        f"🔴 Срочных: {stats['urgent_count']}\n"
-        f"🕒 Последняя синхронизация: {stats['last_sync']}\n\n"
-        f"📎 *Ссылка на таблицу:*\n{sheets_manager.get_sheet_url()}"
-    )
-    
-    update.message.reply_text(
-        stats_text,
-        reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-def show_excel_settings(update: Update, context: CallbackContext) -> None:
-    """Показывает настройки Excel"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    settings_text = (
-        "⚙️ *Настройки Google Sheets*\n\n"
-        f"📊 Включено: {'✅ Да' if GOOGLE_SHEETS_CONFIG['enabled'] else '❌ Нет'}\n"
-        f"📁 Таблица: {GOOGLE_SHEETS_CONFIG['spreadsheet_name']}\n"
-        f"📄 Лист: {GOOGLE_SHEETS_CONFIG['worksheet_name']}\n"
-        f"🔄 Автосинхронизация: {'✅ Включена' if GOOGLE_SHEETS_CONFIG['auto_sync'] else '❌ Выключена'}\n"
-        f"⏱️ Интервал: {GOOGLE_SHEETS_CONFIG['sync_interval']} сек.\n\n"
-        f"🔗 Статус подключения: {'✅ Подключено' if sheets_manager.connected else '❌ Не подключено'}\n"
-    )
-    
-    if sheets_manager.connected:
-        settings_text += f"📎 Ссылка: {sheets_manager.get_sheet_url()}"
-    
-    update.message.reply_text(
-        settings_text,
-        reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-def view_excel_data(update: Update, context: CallbackContext) -> None:
-    """Показывает данные из Excel"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    if not sheets_manager.connected:
-        update.message.reply_text(
-            "❌ Google Sheets не подключен",
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-        )
-        return
-    
-    try:
-        # Получаем последние 5 заявок из Google Sheets
-        all_records = sheets_manager.sheet.get_all_records()
-        recent_records = all_records[:5]  # Последние 5 записей
-        
-        if not recent_records:
-            update.message.reply_text(
-                "📭 В Google Sheets пока нет данных",
-                reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-            )
-            return
-        
-        excel_data_text = "📊 *Последние заявки из Google Sheets:*\n\n"
-        
-        for i, record in enumerate(recent_records, 1):
-            excel_data_text += (
-                f"{i}. *#{record.get('ID', 'N/A')}* - {record.get('Статус', 'N/A')}\n"
-                f"   👤 {record.get('Имя', 'N/A')} | {record.get('Телефон', 'N/A')}\n"
-                f"   📍 {record.get('Участок', 'N/A')} | {record.get('Тип системы', 'N/A')}\n"
-                f"   ⏰ {record.get('Срочность', 'N/A')}\n\n"
-            )
-        
-        excel_data_text += f"📎 Полная таблица: {sheets_manager.get_sheet_url()}"
-        
-        update.message.reply_text(
-            excel_data_text,
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-    except Exception as e:
-        update.message.reply_text(
-            f"❌ Ошибка получения данных: {e}",
-            reply_markup=ReplyKeyboardMarkup(excel_online_keyboard, resize_keyboard=True)
-        )
-
-# ==================== ОСНОВНЫЕ ФУНКЦИИ БОТА ====================
+# ==================== СОЗДАНИЕ ЗАЯВКИ ====================
 
 def start_request_creation(update: Update, context: CallbackContext) -> int:
     """Начинает процесс создания заявки"""
@@ -1162,7 +669,7 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-# ==================== ФУНКЦИИ РЕДАКТИРОВАНИЯ ====================
+# ==================== РЕДАКТИРОВАНИЕ ЗАЯВКИ ====================
 
 def edit_request_choice(update: Update, context: CallbackContext) -> int:
     """Показывает меню выбора поля для редактирования"""
@@ -1245,7 +752,26 @@ def handle_edit_choice(update: Update, context: CallbackContext) -> int:
         # Завершаем редактирование и возвращаемся к сводке
         context.user_data.pop('editing_mode', None)
         context.user_data.pop('editing_field', None)
-        return show_request_summary(update, context)
+        
+        # Обновляем сводку
+        context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        update_summary(context)
+        
+        # Показываем обновленную сводку для подтверждения
+        if context.user_data.get('photo'):
+            update.message.reply_photo(
+                photo=context.user_data['photo'],
+                caption=f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                f"{context.user_data['summary']}\n\n*Подтвердите отправку заявки:*",
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return ConversationHandler.END
     
     else:
         update.message.reply_text(
@@ -1394,6 +920,13 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
     update_summary(context)
     return edit_request_choice(update, context)
 
+def cancel_editing(update: Update, context: CallbackContext) -> int:
+    """Отменяет редактирование и возвращает к подтверждению"""
+    context.user_data.pop('editing_mode', None)
+    context.user_data.pop('editing_field', None)
+    
+    return show_request_summary(update, context)
+
 # ==================== ВИЗУАЛЬНОЕ МЕНЮ ====================
 
 def get_admin_panel_with_counters():
@@ -1404,7 +937,7 @@ def get_admin_panel_with_counters():
     return [
         [f'🆕 Новые заявки ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
         ['✅ Выполненные заявки', '📊 Статистика'],
-        ['🔧 Управление', '📊 Excel онлайн']
+        ['🔧 Управление']
     ]
 
 def show_main_menu(update: Update, context: CallbackContext) -> None:
@@ -1452,6 +985,110 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
         parse_mode=ParseMode.MARKDOWN
     )
 
+def show_my_requests(update: Update, context: CallbackContext) -> None:
+    """Показывает заявки пользователя с разделением по статусам"""
+    user_id = update.message.from_user.id
+    
+    # Определяем клавиатуру в зависимости от прав
+    if user_id in ADMIN_CHAT_IDS:
+        # Администратору показываем админ-панель
+        return show_admin_panel(update, context)
+    else:
+        keyboard = user_main_menu_keyboard
+    
+    requests = db.get_user_requests(user_id, 50)
+    
+    if not requests:
+        update.message.reply_text(
+            "📭 У вас пока нет созданных заявок.\n\n"
+            "Хотите создать первую заявку?",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+    
+    # Разделяем заявки по статусам
+    active_requests = [req for req in requests if req['status'] != 'completed']
+    completed_requests = [req for req in requests if req['status'] == 'completed']
+    
+    if not active_requests and not completed_requests:
+        update.message.reply_text(
+            "📭 У вас пока нет созданных заявок.\n\n"
+            "Хотите создать первую заявку?",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+    
+    # Показываем активные заявки
+    if active_requests:
+        update.message.reply_text(
+            f"📋 *Ваши активные заявки ({len(active_requests)}):*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        
+        for req in active_requests:
+            status_icons = {
+                'new': '🆕 НОВАЯ',
+                'in_progress': '🔄 В РАБОТЕ', 
+                'completed': '✅ ВЫПОЛНЕНА'
+            }
+            
+            status_text = status_icons.get(req['status'], req['status'])
+            
+            request_text = (
+                f"{status_icons.get(req['status'], '📋')} *Заявка #{req['id']}*\n"
+                f"🔧 *Тип:* {req['system_type']}\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"🔄 *Статус:* {status_text}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+            )
+            
+            if req.get('assigned_admin') and req['status'] == 'in_progress':
+                request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
+            
+            if req.get('admin_comment'):
+                request_text += f"💬 *Комментарий:* {req['admin_comment']}\n"
+            
+            update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+    
+    # Показываем выполненные заявки отдельно
+    if completed_requests:
+        update.message.reply_text(
+            f"✅ *История выполненных заявок ({len(completed_requests)}):*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        
+        for req in completed_requests:
+            request_text = (
+                f"✅ *Заявка #{req['id']} - ВЫПОЛНЕНА*\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem'][:100]}{'...' if len(req['problem']) > 100 else ''}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"✅ *Завершена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}\n"
+            )
+            
+            if req.get('assigned_admin'):
+                request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
+            
+            if req.get('admin_comment'):
+                request_text += f"💬 *Комментарий:* {req['admin_comment']}\n"
+            
+            update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+    
+    # Итоговое сообщение
+    total_text = f"📊 *Итого:* {len(active_requests)} активных, {len(completed_requests)} выполненных заявок"
+    update.message.reply_text(
+        total_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
     """Показывает админ-панель с новыми, в работе и выполненными заявками"""
     user_id = update.message.from_user.id
@@ -1479,54 +1116,6 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-def show_my_requests(update: Update, context: CallbackContext) -> None:
-    """Показывает заявки пользователя"""
-    user_id = update.message.from_user.id
-    
-    if user_id in ADMIN_CHAT_IDS:
-        return show_admin_panel(update, context)
-    else:
-        keyboard = user_main_menu_keyboard
-    
-    requests = db.get_user_requests(user_id, 50)
-    
-    if not requests:
-        update.message.reply_text(
-            "📭 У вас пока нет созданных заявок.\n\n"
-            "Хотите создать первую заявку?",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-    
-    update.message.reply_text(
-        f"📋 *Ваши заявки ({len(requests)}):*",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    
-    for req in requests:
-        status_icons = {
-            'new': '🆕',
-            'in_progress': '🔄', 
-            'completed': '✅'
-        }
-        
-        request_text = (
-            f"{status_icons.get(req['status'], '📋')} *Заявка #{req['id']}*\n"
-            f"🔧 *Тип:* {req['system_type']}\n"
-            f"📍 *Участок:* {req['plot']}\n"
-            f"⏰ *Срочность:* {req['urgency']}\n"
-            f"🔄 *Статус:* {req['status']}\n"
-            f"🕒 *Создана:* {req['created_at'][:16]}\n"
-        )
-        
-        if req.get('assigned_admin') and req['status'] == 'in_progress':
-            request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
-        
-        update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
-
 def show_requests_by_filter(update: Update, context: CallbackContext, filter_type: str) -> None:
     """Показывает заявки по фильтру"""
     user_id = update.message.from_user.id
@@ -1539,33 +1128,441 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         'in_progress': '🔄 Заявки в работе',
         'completed': '✅ Выполненные заявки'
     }
+    filter_name = f"{filter_names[filter_type]} ({len(requests)})"
     
     if not requests:
         update.message.reply_text(
-            f"📭 {filter_names[filter_type]} отсутствуют.",
+            f"📭 {filter_name} отсутствуют.",
             reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
         )
         return
     
     update.message.reply_text(
-        f"{filter_names[filter_type]} ({len(requests)}):",
+        filter_name,
         reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
     )
     
     for req in requests:
-        request_text = (
-            f"*Заявка #{req['id']}*\n"
-            f"👤 *Клиент:* {req['name']}\n"
-            f"📞 *Телефон:* `{req['phone']}`\n"
-            f"📍 *Участок:* {req['plot']}\n"
-            f"🔧 *Тип системы:* {req['system_type']}\n"
-            f"⏰ *Срочность:* {req['urgency']}\n"
-            f"📝 *Описание:* {req['problem'][:100]}...\n"
-            f"🔄 *Статус:* {req['status']}\n"
-            f"🕒 *Создана:* {req['created_at'][:16]}"
+        # Определяем текст в зависимости от статуса заявки
+        if req['status'] == 'completed':
+            request_text = (
+                f"✅ *Заявка #{req['id']} - ВЫПОЛНЕНА*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"👨‍💼 *Исполнитель:* {req.get('assigned_admin', 'Не назначен')}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"✅ *Завершена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
+            )
+        elif req['status'] == 'in_progress':
+            request_text = (
+                f"🔄 *Заявка #{req['id']} - В РАБОТЕ*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"👨‍💼 *Исполнитель:* {req.get('assigned_admin', 'Не назначен')}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"🔄 *Обновлена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
+            )
+        else:
+            request_text = (
+                f"🆕 *Заявка #{req['id']} - НОВАЯ*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}"
+            )
+        
+        if req.get('admin_comment'):
+            request_text += f"\n💬 *Комментарий администратора:* {req['admin_comment']}"
+        
+        # Определяем кнопки в зависимости от статуса заявки
+        if req['status'] == 'completed':
+            # Для выполненных заявок - только кнопка "Написать"
+            keyboard = [[
+                InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+            ]]
+        elif req['status'] == 'in_progress':
+            # Для заявок в работе
+            if req.get('assigned_admin') == update.message.from_user.first_name:
+                # Если текущий администратор - исполнитель
+                keyboard = [[
+                    InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}"),
+                    InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+                ]]
+            else:
+                # Если заявка в работе у другого администратора
+                keyboard = [[
+                    InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+                ]]
+        else:
+            # Для новых заявки
+            keyboard = [[
+                InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}"),
+                InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+            ]]
+        
+        # Отправляем заявку с фото или без
+        if req.get('photo'):
+            update.message.reply_photo(
+                photo=req['photo'],
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+def handle_admin_callback(update: Update, context: CallbackContext) -> None:
+    """Обработчик callback от админ-кнопок"""
+    query = update.callback_query
+    query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        return
+    
+    if data.startswith('take_'):
+        request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        # ДОБАВЛЕНО: Подтверждение взятия в работу
+        confirmation_text = (
+            f"⚠️ *Подтверждение*\n\n"
+            f"Вы действительно хотите взять в работу заявку #{request_id}?\n\n"
+            f"👤 *Клиент:* {db.get_request(request_id)['name']}\n"
+            f"📍 *Участок:* {db.get_request(request_id)['plot']}\n"
+            f"🔧 *Тип системы:* {db.get_request(request_id)['system_type']}"
         )
         
-        update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+        keyboard = [[
+            InlineKeyboardButton("✅ Да, взять в работу", callback_data=f"confirm_take_{request_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_take_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data.startswith('confirm_take_'):
+        request_id = int(data.split('_')[2])
+        admin_name = query.from_user.first_name
+        
+        # Обновляем статус заявки и назначаем администратора
+        db.update_request_status(
+            request_id, 
+            "in_progress", 
+            f"Заявка взята в работу администратором {admin_name}",
+            admin_name
+        )
+        
+        # Получаем информацию о заявке для уведомления пользователя
+        request = db.get_request(request_id)
+        if request and request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"🔄 *Ваша заявка #{request_id} взята в работу!*\n\n"
+                         f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                         f"📞 С вами свяжутся в ближайшее время.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
+        
+        # Обновляем сообщение с заявкой
+        request_text = (
+            f"✅ *Заявка #{request_id} взята вами в работу!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n\n"
+            f"🔄 *Статус:* В работе\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}"
+        )
+        
+        # Обновляем inline-клавиатуру
+        keyboard = [[
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("✅ Заявка взята в работу!")
+        
+    elif data.startswith('cancel_take_'):
+        request_id = int(data.split('_')[2])
+        request = db.get_request(request_id)
+        
+        # Возвращаем к исходному состоянию заявки
+        request_text = (
+            f"🆕 *Заявка #{request_id} - НОВАЯ*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{request_id}"),
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("❌ Действие отменено")
+        
+    elif data.startswith('complete_'):
+        request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        # ДОБАВЛЕНО: Подтверждение выполнения
+        confirmation_text = (
+            f"⚠️ *Подтверждение выполнения*\n\n"
+            f"Вы действительно хотите отметить заявку #{request_id} как выполненную?\n\n"
+            f"👤 *Клиент:* {db.get_request(request_id)['name']}\n"
+            f"📍 *Участок:* {db.get_request(request_id)['plot']}\n"
+            f"🔧 *Тип системы:* {db.get_request(request_id)['system_type']}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Да, выполнено", callback_data=f"confirm_complete_{request_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_complete_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=confirmation_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data.startswith('confirm_complete_'):
+        request_id = int(data.split('_')[2])
+        admin_name = query.from_user.first_name
+        
+        # Обновляем статус заявки на "выполнено"
+        db.update_request_status(
+            request_id, 
+            "completed", 
+            f"Заявка выполнена администратором {admin_name}",
+            admin_name
+        )
+        
+        # Получаем информацию о заявке для уведомления пользователя
+        request = db.get_request(request_id)
+        if request and request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"✅ *Ваша заявка #{request_id} выполнена!*\n\n"
+                         f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                         f"💬 *Комментарий:* Заявка выполнена\n\n"
+                         f"_Спасибо, что воспользовались нашими услугами!_ 🛠️",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
+        
+        # Обновляем сообщение с заявкой
+        request_text = (
+            f"✅ *Заявка #{request_id} ВЫПОЛНЕНА!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n\n"
+            f"✅ *Статус:* Выполнено\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}\n"
+            f"💬 *Комментарий:* Заявка выполнена\n"
+            f"🕒 *Завершена:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        # Обновляем inline-клавиатуру для выполненных заявок
+        keyboard = [[
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("✅ Заявка выполнена!")
+        
+    elif data.startswith('cancel_complete_'):
+        request_id = int(data.split('_')[2])
+        request = db.get_request(request_id)
+        
+        # Возвращаем к исходному состоянию заявки
+        request_text = (
+            f"🔄 *Заявка #{request_id} - В РАБОТЕ*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n"
+            f"👨‍💼 *Исполнитель:* {request.get('assigned_admin', 'Не назначен')}\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("❌ Действие отменено")
+    
+    elif data.startswith('message_'):
+        request_id = int(data.split('_')[1])
+        request = db.get_request(request_id)
+        
+        if request:
+            contact_text = (
+                f"💬 *Контактная информация по заявке #{request_id}*\n\n"
+                f"👤 *Клиент:* {request['name']}\n"
+                f"📞 *Телефон:* `{request['phone']}`\n"
+                f"📍 *Участок:* {request['plot']}\n"
+                f"🔧 *Тип системы:* {request['system_type']}\n"
+                f"⏰ *Срочность:* {request['urgency']}\n\n"
+            )
+            
+            # Создаем кнопки для контакта (ТОЛЬКО если есть username)
+            keyboard_buttons = []
+            
+            # Если есть username, добавляем кнопку прямого сообщения
+            if request.get('username'):
+                keyboard_buttons.append([
+                    InlineKeyboardButton(
+                        "💬 Написать в Telegram", 
+                        url=f"https://t.me/{request['username']}"
+                    )
+                ])
+                contact_text += f"💬 *Username:* @{request['username']}\n\n"
+            else:
+                # Если username нет, показываем инструкцию
+                contact_text += (
+                    "_Для связи с клиентом:_\n"
+                    "1. *Скопируйте номер телефона выше*\n"
+                    "2. *Найдите номер вручную в поиске Telegram*\n\n"
+                    "_Если у клиента нет аккаунта Telegram, свяжитесь по телефону_"
+                )
+            
+            query.answer("💬 Контактная информация")
+            
+            # Отправляем отдельное сообщение с кнопками для связи
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=contact_text,
+                reply_markup=InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None,
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+# ==================== НОВЫЕ ФУНКЦИИ ДЛЯ АДМИНОВ ====================
+
+def show_admin_management(update: Update, context: CallbackContext) -> None:
+    """Показывает меню управления для админов"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    management_text = (
+        "🔧 *Панель управления администратора*\n\n"
+        "Выберите действие:"
+    )
+    
+    update.message.reply_text(
+        management_text,
+        reply_markup=ReplyKeyboardMarkup(admin_management_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 def show_statistics(update: Update, context: CallbackContext) -> None:
     """Показывает статистику бота"""
@@ -1583,29 +1580,13 @@ def show_statistics(update: Update, context: CallbackContext) -> None:
         f"🔄 *В работе:* {stats['in_progress_requests']}\n"
         f"✅ *Выполнено:* {stats['completed_requests']}\n"
         f"📅 *Заявок сегодня:* {stats['today_requests']}\n"
-        f"📅 *Заявок вчера:* {stats['yesterday_requests']}"
+        f"📅 *Заявок вчера:* {stats['yesterday_requests']}\n\n"
+        f"📈 *Активность:* {'📈 Высокая' if stats['today_requests'] > 5 else '📉 Низкая' if stats['today_requests'] == 0 else '➡️ Средняя'}"
     )
     
     update.message.reply_text(
         stats_text,
         reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-def show_admin_management(update: Update, context: CallbackContext) -> None:
-    """Показывает меню управления для админов"""
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_CHAT_IDS:
-        return show_main_menu(update, context)
-    
-    management_text = (
-        "🔧 *Панель управления администратора*\n\n"
-        "Выберите действие:"
-    )
-    
-    update.message.reply_text(
-        management_text,
-        reply_markup=ReplyKeyboardMarkup(admin_management_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1627,7 +1608,7 @@ def send_broadcast(update: Update, context: CallbackContext) -> None:
     """Отправляет рассылку всем пользователям"""
     user_id = update.message.from_user.id
     if user_id not in ADMIN_CHAT_IDS or not context.user_data.get('broadcast_mode'):
-        return show_admin_management(update, context)
+        return show_main_menu(update, context)
     
     if update.message.text == '❌ Отменить рассылку':
         context.user_data.pop('broadcast_mode', None)
@@ -1697,6 +1678,57 @@ def export_requests(update: Update, context: CallbackContext) -> None:
             reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
         )
 
+def add_admin_comment_command(update: Update, context: CallbackContext) -> None:
+    """Добавляет комментарий администратора к заявке"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return
+    
+    try:
+        # Формат: /comment <request_id> <текст комментария>
+        args = context.args
+        if len(args) < 2:
+            update.message.reply_text(
+                "❌ Использование: /comment <ID_заявки> <текст комментария>"
+            )
+            return
+        
+        request_id = int(args[0])
+        comment_text = ' '.join(args[1:])
+        
+        # Получаем заявку
+        request = db.get_request(request_id)
+        if not request:
+            update.message.reply_text("❌ Заявка не найдена")
+            return
+        
+        # Обновляем комментарий
+        db.update_request_status(
+            request_id, 
+            request['status'], 
+            comment_text,
+            request.get('assigned_admin')
+        )
+        
+        # Уведомляем пользователя
+        if request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"💬 *Новый комментарий к заявке #{request_id}:*\n\n{comment_text}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя: {e}")
+        
+        update.message.reply_text(f"✅ Комментарий добавлен к заявке #{request_id}")
+        
+    except ValueError:
+        update.message.reply_text("❌ Неверный формат ID заявки")
+    except Exception as e:
+        logger.error(f"Ошибка добавления комментария: {e}")
+        update.message.reply_text("❌ Ошибка при добавлении комментария")
+
 def update_counters(update: Update, context: CallbackContext) -> None:
     """Обновляет счетчики в реальном времени"""
     user_id = update.message.from_user.id
@@ -1707,13 +1739,6 @@ def update_counters(update: Update, context: CallbackContext) -> None:
         "✅ Счетчики обновлены!",
         reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
     )
-
-def handle_broadcast_message(update: Update, context: CallbackContext) -> None:
-    """Обрабатывает сообщения в режиме рассылки"""
-    if context.user_data.get('broadcast_mode'):
-        return send_broadcast(update, context)
-    else:
-        return handle_admin_menu(update, context)
 
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 
@@ -1756,29 +1781,21 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
         return show_statistics(update, context)
     elif text == '🔧 Управление':
         return show_admin_management(update, context)
-    elif text == '📊 Excel онлайн':
-        return show_excel_online(update, context)
     elif text == '📢 Сделать рассылку':
         return start_broadcast(update, context)
     elif text == '🔄 Обновить счетчики':
         return update_counters(update, context)
     elif text == '📁 Экспорт заявок':
         return export_requests(update, context)
-    elif text == '🔄 Синхронизировать с Excel':
-        return sync_with_excel(update, context)
     elif text == '🔙 Назад в админ-панель':
         return show_admin_panel(update, context)
-    # Обработка меню Excel онлайн
-    elif text == '🔄 Обновить данные':
-        return sync_with_excel(update, context)
-    elif text == '📊 Статистика Excel':
-        return show_excel_stats(update, context)
-    elif text == '⚙️ Настройки Excel':
-        return show_excel_settings(update, context)
-    elif text == '📋 Просмотреть Excel':
-        return view_excel_data(update, context)
-    elif text == '🔙 Назад в админ-панель':
-        return show_admin_panel(update, context)
+
+def handle_broadcast_message(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает сообщения в режиме рассылки"""
+    if context.user_data.get('broadcast_mode'):
+        return send_broadcast(update, context)
+    else:
+        return handle_admin_menu(update, context)
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
@@ -1832,6 +1849,7 @@ def main() -> None:
         dispatcher.add_handler(CommandHandler('start', show_main_menu))
         dispatcher.add_handler(CommandHandler('menu', show_main_menu))
         dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
+        dispatcher.add_handler(CommandHandler('comment', add_admin_comment_command))
         
         # Обработчики разговоров
         dispatcher.add_handler(conv_handler)
@@ -1843,7 +1861,7 @@ def main() -> None:
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔧 Управление|📊 Excel онлайн|📢 Сделать рассылку|🔄 Обновить счетчики|📁 Экспорт заявок|🔄 Синхронизировать с Excel|🔙 Назад в админ-панель|🔄 Обновить данные|📊 Статистика Excel|⚙️ Настройки Excel|📋 Просмотреть Excel)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔧 Управление|📢 Сделать рассылку|🔄 Обновить счетчики|📁 Экспорт заявок|🔙 Назад в админ-панель|❌ Отменить рассылку)$'), 
             handle_admin_menu
         ))
         
@@ -1852,12 +1870,16 @@ def main() -> None:
             Filters.text & ~Filters.command,
             handle_broadcast_message
         ))
+        
+        # Обработчики callback для админ-панели
+        dispatcher.add_handler(CallbackQueryHandler(
+            handle_admin_callback, 
+            pattern='^(take_|complete_|message_|confirm_take_|cancel_take_|confirm_complete_|cancel_complete_)'
+        ))
 
         # Запускаем бота
-        logger.info("🤖 Бот запущен с интеграцией Google Sheets!")
+        logger.info("🤖 Бот запущен с визуальным меню!")
         logger.info(f"👑 Администраторы: {ADMIN_CHAT_IDS}")
-        if sheets_manager.connected:
-            logger.info("📊 Google Sheets подключен и готов к работе")
         
         updater.start_polling()
         updater.idle()
