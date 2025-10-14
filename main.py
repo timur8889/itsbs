@@ -28,10 +28,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 import threading
 import time
 
-# Чтение ключа из переменной окружения
-service_account_info = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON'])
-creds = Credentials.from_service_account_info(service_account_info)
-client = gspread.authorize(creds)
 # Включим логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
@@ -1163,6 +1159,238 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
+# ==================== ФУНКЦИИ РЕДАКТИРОВАНИЯ ====================
+
+def edit_request_choice(update: Update, context: CallbackContext) -> int:
+    """Показывает меню выбора поля для редактирования"""
+    summary = context.user_data.get('summary', '')
+    
+    update.message.reply_text(
+        f"{summary}\n\n"
+        "✏️ *Выберите поле для редактирования:*",
+        reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return EDIT_CHOICE
+
+def handle_edit_choice(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает выбор поля для редактирования"""
+    choice = update.message.text
+    context.user_data['editing_field'] = choice
+    
+    if choice == '📛 Редактировать имя':
+        update.message.reply_text(
+            "✏️ *Введите новое имя:*\n\nТекущее имя: " + context.user_data.get('name', 'Не указано'),
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📞 Редактировать телефон':
+        update.message.reply_text(
+            f"✏️ *Введите новый телефон:*\n\nПример: +7 999 123-45-67\nТекущий телефон: `{context.user_data.get('phone', 'Не указано')}`",
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📍 Редактировать участок':
+        update.message.reply_text(
+            f"✏️ *Выберите новый участок:*\n\nТекущий участок: {context.user_data.get('plot', 'Не указан')}",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '🔧 Редактировать систему':
+        update.message.reply_text(
+            f"✏️ *Выберите новую систему:*\n\nТекущая система: {context.user_data.get('system_type', 'Не указана')}",
+            reply_markup=ReplyKeyboardMarkup(create_request_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📝 Редактировать описание':
+        update.message.reply_text(
+            f"✏️ *Введите новое описание проблемы:*\n\nТекущее описание: {context.user_data.get('problem', 'Не указано')}",
+            reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '⏰ Редактировать срочность':
+        update.message.reply_text(
+            f"✏️ *Выберите новую срочность:*\n\nТекущая срочность: {context.user_data.get('urgency', 'Не указана')}",
+            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '📷 Редактировать фото':
+        photo_status = "✅ Есть" if context.user_data.get('photo') else "❌ Нет"
+        update.message.reply_text(
+            f"✏️ *Редактирование фото:*\n\nТекущий статус фото: {photo_status}",
+            reply_markup=ReplyKeyboardMarkup([
+                ['📷 Добавить новое фото', '🗑️ Удалить фото'],
+                ['🔙 Назад к редактированию']
+            ], resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_FIELD
+        
+    elif choice == '✅ Завершить редактирование':
+        # Завершаем редактирование и возвращаемся к сводке
+        context.user_data.pop('editing_mode', None)
+        context.user_data.pop('editing_field', None)
+        return show_request_summary(update, context)
+    
+    else:
+        update.message.reply_text(
+            "❌ Пожалуйста, выберите поле для редактирования из меню.",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        return EDIT_CHOICE
+
+def handle_edit_field(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает ввод новых данных для поля"""
+    editing_field = context.user_data.get('editing_field')
+    text = update.message.text
+    
+    # Обработка кнопки "Назад"
+    if text == '🔙 Назад к редактированию':
+        return edit_request_choice(update, context)
+    
+    # Обработка фото
+    if update.message.photo:
+        context.user_data['photo'] = update.message.photo[-1].file_id
+        update.message.reply_text(
+            "✅ Фото обновлено!",
+            reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+        )
+        # Обновляем сводку и возвращаемся к меню редактирования
+        context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        update_summary(context)
+        return edit_request_choice(update, context)
+    
+    # Обработка текстовых полей
+    if editing_field == '📛 Редактировать имя':
+        if text and text != '🔙 Назад к редактированию':
+            context.user_data['name'] = text
+            update.message.reply_text(
+                "✅ Имя обновлено!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Имя не может быть пустым.",
+                reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '📞 Редактировать телефон':
+        if text and text != '🔙 Назад к редактированию':
+            context.user_data['phone'] = text
+            update.message.reply_text(
+                "✅ Телефон обновлен!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Телефон не может быть пустым.",
+                reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '📍 Редактировать участок':
+        if text in ['🔙 Назад', '🔙 Назад в меню']:
+            return edit_request_choice(update, context)
+        elif text and text != '🔙 Назад к редактированию':
+            context.user_data['plot'] = text
+            update.message.reply_text(
+                "✅ Участок обновлен!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Пожалуйста, выберите участок из меню.",
+                reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '🔧 Редактировать систему':
+        if text in ['🔙 Назад', '🔙 Назад в меню']:
+            return edit_request_choice(update, context)
+        elif text and text != '🔙 Назад к редактированию':
+            context.user_data['system_type'] = text
+            update.message.reply_text(
+                "✅ Система обновлена!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Пожалуйста, выберите систему из меню.",
+                reply_markup=ReplyKeyboardMarkup(create_request_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '📝 Редактировать описание':
+        if text and text != '🔙 Назад к редактированию':
+            context.user_data['problem'] = text
+            update.message.reply_text(
+                "✅ Описание обновлено!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Описание не может быть пустым.",
+                reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '⏰ Редактировать срочность':
+        if text == '🔙 Назад':
+            return edit_request_choice(update, context)
+        elif text and text != '🔙 Назад к редактированию':
+            context.user_data['urgency'] = text
+            update.message.reply_text(
+                "✅ Срочность обновлена!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Пожалуйста, выберите срочность из меню.",
+                reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        
+    elif editing_field == '📷 Редактировать фото':
+        if text == '📷 Добавить новое фото':
+            update.message.reply_text(
+                "📸 Отправьте новое фото:",
+                reply_markup=ReplyKeyboardMarkup(edit_field_keyboard, resize_keyboard=True)
+            )
+            return EDIT_FIELD
+        elif text == '🗑️ Удалить фото':
+            context.user_data['photo'] = None
+            update.message.reply_text(
+                "✅ Фото удалено!",
+                reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
+            )
+        else:
+            update.message.reply_text(
+                "❌ Пожалуйста, выберите действие из меню.",
+                reply_markup=ReplyKeyboardMarkup([
+                    ['📷 Добавить новое фото', '🗑️ Удалить фото'],
+                    ['🔙 Назад к редактированию']
+                ], resize_keyboard=True)
+            )
+            return EDIT_FIELD
+    
+    # Обновляем сводку
+    context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
+    update_summary(context)
+    return edit_request_choice(update, context)
+
 # ==================== ВИЗУАЛЬНОЕ МЕНЮ ====================
 
 def get_admin_panel_with_counters():
@@ -1247,6 +1475,242 @@ def show_admin_panel(update: Update, context: CallbackContext) -> None:
         reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
+
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+def show_my_requests(update: Update, context: CallbackContext) -> None:
+    """Показывает заявки пользователя"""
+    user_id = update.message.from_user.id
+    
+    if user_id in ADMIN_CHAT_IDS:
+        return show_admin_panel(update, context)
+    else:
+        keyboard = user_main_menu_keyboard
+    
+    requests = db.get_user_requests(user_id, 50)
+    
+    if not requests:
+        update.message.reply_text(
+            "📭 У вас пока нет созданных заявок.\n\n"
+            "Хотите создать первую заявку?",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+    
+    update.message.reply_text(
+        f"📋 *Ваши заявки ({len(requests)}):*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    
+    for req in requests:
+        status_icons = {
+            'new': '🆕',
+            'in_progress': '🔄', 
+            'completed': '✅'
+        }
+        
+        request_text = (
+            f"{status_icons.get(req['status'], '📋')} *Заявка #{req['id']}*\n"
+            f"🔧 *Тип:* {req['system_type']}\n"
+            f"📍 *Участок:* {req['plot']}\n"
+            f"⏰ *Срочность:* {req['urgency']}\n"
+            f"🔄 *Статус:* {req['status']}\n"
+            f"🕒 *Создана:* {req['created_at'][:16]}\n"
+        )
+        
+        if req.get('assigned_admin') and req['status'] == 'in_progress':
+            request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
+        
+        update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+
+def show_requests_by_filter(update: Update, context: CallbackContext, filter_type: str) -> None:
+    """Показывает заявки по фильтру"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    requests = db.get_requests_by_filter(filter_type, 50)
+    filter_names = {
+        'new': '🆕 Новые заявки',
+        'in_progress': '🔄 Заявки в работе',
+        'completed': '✅ Выполненные заявки'
+    }
+    
+    if not requests:
+        update.message.reply_text(
+            f"📭 {filter_names[filter_type]} отсутствуют.",
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+        )
+        return
+    
+    update.message.reply_text(
+        f"{filter_names[filter_type]} ({len(requests)}):",
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+    )
+    
+    for req in requests:
+        request_text = (
+            f"*Заявка #{req['id']}*\n"
+            f"👤 *Клиент:* {req['name']}\n"
+            f"📞 *Телефон:* `{req['phone']}`\n"
+            f"📍 *Участок:* {req['plot']}\n"
+            f"🔧 *Тип системы:* {req['system_type']}\n"
+            f"⏰ *Срочность:* {req['urgency']}\n"
+            f"📝 *Описание:* {req['problem'][:100]}...\n"
+            f"🔄 *Статус:* {req['status']}\n"
+            f"🕒 *Создана:* {req['created_at'][:16]}"
+        )
+        
+        update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+
+def show_statistics(update: Update, context: CallbackContext) -> None:
+    """Показывает статистику бота"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    stats = db.get_statistics()
+    
+    stats_text = (
+        "📊 *Статистика бота*\n\n"
+        f"👥 *Всего пользователей:* {stats['total_users']}\n"
+        f"📋 *Всего заявок:* {stats['total_requests']}\n"
+        f"🆕 *Новых заявок:* {stats['new_requests']}\n"
+        f"🔄 *В работе:* {stats['in_progress_requests']}\n"
+        f"✅ *Выполнено:* {stats['completed_requests']}\n"
+        f"📅 *Заявок сегодня:* {stats['today_requests']}\n"
+        f"📅 *Заявок вчера:* {stats['yesterday_requests']}"
+    )
+    
+    update.message.reply_text(
+        stats_text,
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def show_admin_management(update: Update, context: CallbackContext) -> None:
+    """Показывает меню управления для админов"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    management_text = (
+        "🔧 *Панель управления администратора*\n\n"
+        "Выберите действие:"
+    )
+    
+    update.message.reply_text(
+        management_text,
+        reply_markup=ReplyKeyboardMarkup(admin_management_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def start_broadcast(update: Update, context: CallbackContext) -> None:
+    """Начинает процесс рассылки"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    context.user_data['broadcast_mode'] = True
+    update.message.reply_text(
+        "📢 *Режим рассылки*\n\n"
+        "Введите сообщение для рассылки всем пользователям:",
+        reply_markup=ReplyKeyboardMarkup([['❌ Отменить рассылку']], resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def send_broadcast(update: Update, context: CallbackContext) -> None:
+    """Отправляет рассылку всем пользователям"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS or not context.user_data.get('broadcast_mode'):
+        return show_admin_management(update, context)
+    
+    if update.message.text == '❌ Отменить рассылку':
+        context.user_data.pop('broadcast_mode', None)
+        return show_admin_management(update, context)
+    
+    message_text = update.message.text
+    
+    # Получаем всех пользователей
+    users = db.get_all_users()
+    
+    success_count = 0
+    fail_count = 0
+    
+    for user in users:
+        try:
+            context.bot.send_message(
+                chat_id=user['user_id'],
+                text=f"📢 *Объявление от службы слаботочных систем:*\n\n{message_text}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение пользователю {user['user_id']}: {e}")
+            fail_count += 1
+    
+    # Отчет о рассылке
+    report_text = (
+        f"✅ *Рассылка завершена!*\n\n"
+        f"📤 *Отправлено успешно:* {success_count}\n"
+        f"❌ *Не удалось отправить:* {fail_count}\n"
+        f"📝 *Всего пользователей:* {len(users)}"
+    )
+    
+    update.message.reply_text(
+        report_text,
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    context.user_data.pop('broadcast_mode', None)
+
+def export_requests(update: Update, context: CallbackContext) -> None:
+    """Экспортирует заявки в CSV файл"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    try:
+        filename = db.export_requests_to_csv()
+        
+        # Отправляем файл
+        with open(filename, 'rb') as file:
+            context.bot.send_document(
+                chat_id=update.message.chat_id,
+                document=file,
+                filename=filename,
+                caption="📁 *Экспорт заявок в CSV формате*\n\nФайл содержит все заявки из системы."
+            )
+        
+        # Удаляем временный файл
+        os.remove(filename)
+        
+    except Exception as e:
+        logger.error(f"Ошибка экспорта заявок: {e}")
+        update.message.reply_text(
+            "❌ Ошибка при экспорте заявок.",
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+        )
+
+def update_counters(update: Update, context: CallbackContext) -> None:
+    """Обновляет счетчики в реальном времени"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    update.message.reply_text(
+        "✅ Счетчики обновлены!",
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+    )
+
+def handle_broadcast_message(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает сообщения в режиме рассылки"""
+    if context.user_data.get('broadcast_mode'):
+        return send_broadcast(update, context)
+    else:
+        return handle_admin_menu(update, context)
 
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 
@@ -1378,6 +1842,12 @@ def main() -> None:
         dispatcher.add_handler(MessageHandler(
             Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔧 Управление|📊 Excel онлайн|📢 Сделать рассылку|🔄 Обновить счетчики|📁 Экспорт заявок|🔄 Синхронизировать с Excel|🔙 Назад в админ-панель|🔄 Обновить данные|📊 Статистика Excel|⚙️ Настройки Excel|📋 Просмотреть Excel)$'), 
             handle_admin_menu
+        ))
+        
+        # Обработчик рассылки
+        dispatcher.add_handler(MessageHandler(
+            Filters.text & ~Filters.command,
+            handle_broadcast_message
         ))
 
         # Запускаем бота
