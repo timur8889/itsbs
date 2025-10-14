@@ -326,7 +326,7 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
     )
 
 def show_my_requests(update: Update, context: CallbackContext) -> None:
-    """Показывает заявки пользователя"""
+    """Показывает заявки пользователя с разделением по статусам"""
     user_id = update.message.from_user.id
     
     # Определяем клавиатуру в зависимости от прав
@@ -335,7 +335,7 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
     else:
         keyboard = user_main_menu_keyboard
     
-    requests = db.get_user_requests(user_id, 20)
+    requests = db.get_user_requests(user_id, 50)  # Увеличиваем лимит для показа истории
     
     if not requests:
         update.message.reply_text(
@@ -345,32 +345,86 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
         )
         return
     
-    update.message.reply_text(
-        f"📋 *Ваши заявки ({len(requests)}):*",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    # Разделяем заявки по статусам
+    active_requests = [req for req in requests if req['status'] != 'completed']
+    completed_requests = [req for req in requests if req['status'] == 'completed']
     
-    for req in requests:
-        status_icons = {
-            'new': '🆕',
-            'in_progress': '🔄', 
-            'completed': '✅'
-        }
-        
-        request_text = (
-            f"{status_icons.get(req['status'], '📋')} *Заявка #{req['id']}*\n"
-            f"🔧 *Тип:* {req['system_type']}\n"
-            f"📍 *Участок:* {req['plot']}\n"
-            f"⏰ *Срочность:* {req['urgency']}\n"
-            f"🔄 *Статус:* {req['status']}\n"
-            f"🕒 *Создана:* {req['created_at'][:16]}\n"
+    if not active_requests and not completed_requests:
+        update.message.reply_text(
+            "📭 У вас пока нет созданных заявок.\n\n"
+            "Хотите создать первую заявку?",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+    
+    # Показываем активные заявки
+    if active_requests:
+        update.message.reply_text(
+            f"📋 *Ваши активные заявки ({len(active_requests)}):*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         
-        if req.get('admin_comment'):
-            request_text += f"💬 *Комментарий:* {req['admin_comment']}\n"
+        for req in active_requests:
+            status_icons = {
+                'new': '🆕 НОВАЯ',
+                'in_progress': '🔄 В РАБОТЕ', 
+                'completed': '✅ ВЫПОЛНЕНА'
+            }
+            
+            status_text = status_icons.get(req['status'], req['status'])
+            
+            request_text = (
+                f"{status_icons.get(req['status'], '📋')} *Заявка #{req['id']}*\n"
+                f"🔧 *Тип:* {req['system_type']}\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"🔄 *Статус:* {status_text}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+            )
+            
+            if req.get('assigned_admin') and req['status'] == 'in_progress':
+                request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
+            
+            if req.get('admin_comment'):
+                request_text += f"💬 *Комментарий:* {req['admin_comment']}\n"
+            
+            update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+    
+    # Показываем выполненные заявки отдельно
+    if completed_requests:
+        update.message.reply_text(
+            f"✅ *История выполненных заявок ({len(completed_requests)}):*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
         
-        update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+        for req in completed_requests:
+            request_text = (
+                f"✅ *Заявка #{req['id']} - ВЫПОЛНЕНА*\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem'][:100]}{'...' if len(req['problem']) > 100 else ''}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"✅ *Завершена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}\n"
+            )
+            
+            if req.get('assigned_admin'):
+                request_text += f"👨‍💼 *Исполнитель:* {req['assigned_admin']}\n"
+            
+            if req.get('admin_comment'):
+                request_text += f"💬 *Комментарий:* {req['admin_comment']}\n"
+            
+            update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
+    
+    # Итоговое сообщение
+    total_text = f"📊 *Итого:* {len(active_requests)} активных, {len(completed_requests)} выполненных заявок"
+    update.message.reply_text(
+        total_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 
