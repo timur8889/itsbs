@@ -51,6 +51,19 @@ user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
+# Главное меню администратора (ОБНОВЛЕНО - добавлены счетчики)
+admin_main_menu_keyboard = [
+    ['🆕 Новые заявки (0)', '🔄 В работе (0)'],
+    ['✅ Выполненные заявки', '📊 Статистика'],
+    ['🔧 Управление']
+]
+
+# Меню управления для админов
+admin_management_keyboard = [
+    ['📢 Сделать рассылку', '🔄 Обновить счетчики'],
+    ['📁 Экспорт заявок', '🔙 Назад в админ-панель']
+]
+
 # Меню создания заявки
 create_request_keyboard = [
     ['📹 Видеонаблюдение', '🔐 СКУД'],
@@ -127,7 +140,14 @@ class Database:
                     first_name TEXT,
                     last_name TEXT,
                     created_at TEXT,
-                    request_count INTEGER DEFAULT 0
+                    request_count INTEGER DEFAULT 0,
+                    last_activity TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             ''')
             conn.commit()
@@ -164,15 +184,16 @@ class Database:
             
             # Обновляем информацию о пользователе
             cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, request_count)
-                VALUES (?, ?, ?, ?, ?, COALESCE((SELECT request_count FROM users WHERE user_id = ?), 0) + 1)
+                INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, request_count, last_activity)
+                VALUES (?, ?, ?, ?, ?, COALESCE((SELECT request_count FROM users WHERE user_id = ?), 0) + 1, ?)
             ''', (
                 user_data.get('user_id'),
                 user_data.get('username'),
                 user_data.get('first_name', ''),
                 user_data.get('last_name', ''),
                 datetime.now().isoformat(),
-                user_data.get('user_id')
+                user_data.get('user_id'),
+                datetime.now().isoformat()
             ))
             
             conn.commit()
@@ -278,6 +299,85 @@ class Database:
             ''', (admin_name, limit))
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def get_statistics(self) -> Dict:
+        """Получает общую статистику"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM requests')
+            total_requests = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM requests WHERE status = "new"')
+            new_requests = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM requests WHERE status = "in_progress"')
+            in_progress_requests = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM requests WHERE status = "completed"')
+            completed_requests = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(DISTINCT user_id) FROM users')
+            total_users = cursor.fetchone()[0]
+            
+            # Статистика за сегодня
+            today = datetime.now().strftime('%Y-%m-%d')
+            cursor.execute('SELECT requests_count FROM statistics WHERE date = ?', (today,))
+            today_requests = cursor.fetchone()
+            today_requests = today_requests[0] if today_requests else 0
+            
+            # Статистика за вчера
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            cursor.execute('SELECT requests_count FROM statistics WHERE date = ?', (yesterday,))
+            yesterday_requests = cursor.fetchone()
+            yesterday_requests = yesterday_requests[0] if yesterday_requests else 0
+            
+            return {
+                'total_requests': total_requests,
+                'new_requests': new_requests,
+                'in_progress_requests': in_progress_requests,
+                'completed_requests': completed_requests,
+                'total_users': total_users,
+                'today_requests': today_requests,
+                'yesterday_requests': yesterday_requests
+            }
+
+    def get_all_users(self) -> List[Dict]:
+        """Получает всех пользователей"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM users 
+                ORDER BY last_activity DESC
+            ''')
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def export_requests_to_csv(self, filename: str = "export_requests.csv") -> str:
+        """Экспортирует заявки в CSV файл"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, user_id, username, name, phone, plot, system_type, problem, 
+                       urgency, status, created_at, updated_at, assigned_admin, admin_comment
+                FROM requests
+                ORDER BY created_at DESC
+            ''')
+            
+            import csv
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                # Заголовки
+                writer.writerow([
+                    'ID', 'User ID', 'Username', 'Name', 'Phone', 'Plot', 
+                    'System Type', 'Problem', 'Urgency', 'Status', 
+                    'Created At', 'Updated At', 'Assigned Admin', 'Admin Comment'
+                ])
+                # Данные
+                for row in cursor.fetchall():
+                    writer.writerow(row)
+            
+            return filename
 
 # Инициализация базы данных
 db = Database(DB_PATH)
@@ -836,13 +936,32 @@ def get_admin_panel_with_counters():
     
     return [
         [f'🆕 Новые заявки ({len(new_requests)})', f'🔄 В работе ({len(in_progress_requests)})'],
-        ['✅ Выполненные заявки']
+        ['✅ Выполненные заявки', '📊 Статистика'],
+        ['🔧 Управление']
     ]
 
 def show_main_menu(update: Update, context: CallbackContext) -> None:
     """Показывает главное меню"""
     user = update.message.from_user
     user_id = user.id
+    
+    # Обновляем активность пользователя
+    if user_id not in ADMIN_CHAT_IDS:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, last_activity)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM users WHERE user_id = ?), ?), ?)
+            ''', (
+                user.id,
+                user.username,
+                user.first_name,
+                user.last_name,
+                user.id,
+                datetime.now().isoformat(),
+                datetime.now().isoformat()
+            ))
+            conn.commit()
     
     # Определяем клавиатуру в зависимости от прав
     if user_id in ADMIN_CHAT_IDS:
@@ -1386,7 +1505,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         request = db.get_request(request_id)
         
         if request:
-            # УДАЛЕНА: Кнопка "Найти в Telegram по номеру"
             contact_text = (
                 f"💬 *Контактная информация по заявке #{request_id}*\n\n"
                 f"👤 *Клиент:* {request['name']}\n"
@@ -1427,6 +1545,201 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
 
+# ==================== НОВЫЕ ФУНКЦИИ ДЛЯ АДМИНОВ ====================
+
+def show_admin_management(update: Update, context: CallbackContext) -> None:
+    """Показывает меню управления для админов"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    management_text = (
+        "🔧 *Панель управления администратора*\n\n"
+        "Выберите действие:"
+    )
+    
+    update.message.reply_text(
+        management_text,
+        reply_markup=ReplyKeyboardMarkup(admin_management_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def show_statistics(update: Update, context: CallbackContext) -> None:
+    """Показывает статистику бота"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    stats = db.get_statistics()
+    
+    stats_text = (
+        "📊 *Статистика бота*\n\n"
+        f"👥 *Всего пользователей:* {stats['total_users']}\n"
+        f"📋 *Всего заявок:* {stats['total_requests']}\n"
+        f"🆕 *Новых заявок:* {stats['new_requests']}\n"
+        f"🔄 *В работе:* {stats['in_progress_requests']}\n"
+        f"✅ *Выполнено:* {stats['completed_requests']}\n"
+        f"📅 *Заявок сегодня:* {stats['today_requests']}\n"
+        f"📅 *Заявок вчера:* {stats['yesterday_requests']}\n\n"
+        f"📈 *Активность:* {'📈 Высокая' if stats['today_requests'] > 5 else '📉 Низкая' if stats['today_requests'] == 0 else '➡️ Средняя'}"
+    )
+    
+    update.message.reply_text(
+        stats_text,
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def start_broadcast(update: Update, context: CallbackContext) -> None:
+    """Начинает процесс рассылки"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    context.user_data['broadcast_mode'] = True
+    update.message.reply_text(
+        "📢 *Режим рассылки*\n\n"
+        "Введите сообщение для рассылки всем пользователям:",
+        reply_markup=ReplyKeyboardMarkup([['❌ Отменить рассылку']], resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def send_broadcast(update: Update, context: CallbackContext) -> None:
+    """Отправляет рассылку всем пользователям"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS or not context.user_data.get('broadcast_mode'):
+        return show_main_menu(update, context)
+    
+    if update.message.text == '❌ Отменить рассылку':
+        context.user_data.pop('broadcast_mode', None)
+        return show_admin_management(update, context)
+    
+    message_text = update.message.text
+    
+    # Получаем всех пользователей
+    users = db.get_all_users()
+    
+    success_count = 0
+    fail_count = 0
+    
+    for user in users:
+        try:
+            context.bot.send_message(
+                chat_id=user['user_id'],
+                text=f"📢 *Объявление от службы слаботочных систем:*\n\n{message_text}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение пользователю {user['user_id']}: {e}")
+            fail_count += 1
+    
+    # Отчет о рассылке
+    report_text = (
+        f"✅ *Рассылка завершена!*\n\n"
+        f"📤 *Отправлено успешно:* {success_count}\n"
+        f"❌ *Не удалось отправить:* {fail_count}\n"
+        f"📝 *Всего пользователей:* {len(users)}"
+    )
+    
+    update.message.reply_text(
+        report_text,
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    context.user_data.pop('broadcast_mode', None)
+
+def export_requests(update: Update, context: CallbackContext) -> None:
+    """Экспортирует заявки в CSV файл"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    try:
+        filename = db.export_requests_to_csv()
+        
+        # Отправляем файл
+        with open(filename, 'rb') as file:
+            context.bot.send_document(
+                chat_id=update.message.chat_id,
+                document=file,
+                filename=filename,
+                caption="📁 *Экспорт заявок в CSV формате*\n\nФайл содержит все заявки из системы."
+            )
+        
+        # Удаляем временный файл
+        os.remove(filename)
+        
+    except Exception as e:
+        logger.error(f"Ошибка экспорта заявок: {e}")
+        update.message.reply_text(
+            "❌ Ошибка при экспорте заявок.",
+            reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+        )
+
+def add_admin_comment_command(update: Update, context: CallbackContext) -> None:
+    """Добавляет комментарий администратора к заявке"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return
+    
+    try:
+        # Формат: /comment <request_id> <текст комментария>
+        args = context.args
+        if len(args) < 2:
+            update.message.reply_text(
+                "❌ Использование: /comment <ID_заявки> <текст комментария>"
+            )
+            return
+        
+        request_id = int(args[0])
+        comment_text = ' '.join(args[1:])
+        
+        # Получаем заявку
+        request = db.get_request(request_id)
+        if not request:
+            update.message.reply_text("❌ Заявка не найдена")
+            return
+        
+        # Обновляем комментарий
+        db.update_request_status(
+            request_id, 
+            request['status'], 
+            comment_text,
+            request.get('assigned_admin')
+        )
+        
+        # Уведомляем пользователя
+        if request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"💬 *Новый комментарий к заявке #{request_id}:*\n\n{comment_text}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя: {e}")
+        
+        update.message.reply_text(f"✅ Комментарий добавлен к заявке #{request_id}")
+        
+    except ValueError:
+        update.message.reply_text("❌ Неверный формат ID заявки")
+    except Exception as e:
+        logger.error(f"Ошибка добавления комментария: {e}")
+        update.message.reply_text("❌ Ошибка при добавлении комментария")
+
+def update_counters(update: Update, context: CallbackContext) -> None:
+    """Обновляет счетчики в реальном времени"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    update.message.reply_text(
+        "✅ Счетчики обновлены!",
+        reply_markup=ReplyKeyboardMarkup(get_admin_panel_with_counters(), resize_keyboard=True)
+    )
+
 # ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
 
 def handle_main_menu(update: Update, context: CallbackContext) -> None:
@@ -1457,13 +1770,32 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     if user_id not in ADMIN_CHAT_IDS:
         return show_main_menu(update, context)
     
-    # ОБНОВЛЕНО: Обработка кнопок с счетчиками
+    # Обработка кнопок с счетчиками
     if text.startswith('🆕 Новые заявки'):
         return show_requests_by_filter(update, context, 'new')
     elif text.startswith('🔄 В работе'):
         return show_requests_by_filter(update, context, 'in_progress')
     elif text == '✅ Выполненные заявки':
         return show_requests_by_filter(update, context, 'completed')
+    elif text == '📊 Статистика':
+        return show_statistics(update, context)
+    elif text == '🔧 Управление':
+        return show_admin_management(update, context)
+    elif text == '📢 Сделать рассылку':
+        return start_broadcast(update, context)
+    elif text == '🔄 Обновить счетчики':
+        return update_counters(update, context)
+    elif text == '📁 Экспорт заявок':
+        return export_requests(update, context)
+    elif text == '🔙 Назад в админ-панель':
+        return show_admin_panel(update, context)
+
+def handle_broadcast_message(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает сообщения в режиме рассылки"""
+    if context.user_data.get('broadcast_mode'):
+        return send_broadcast(update, context)
+    else:
+        return handle_admin_menu(update, context)
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
@@ -1513,25 +1845,33 @@ def main() -> None:
             confirm_request
         )
 
-        # Регистрируем обработчики
+        # Регистрируем обработчики команд
         dispatcher.add_handler(CommandHandler('start', show_main_menu))
         dispatcher.add_handler(CommandHandler('menu', show_main_menu))
         dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
+        dispatcher.add_handler(CommandHandler('comment', add_admin_comment_command))
         
+        # Обработчики разговоров
         dispatcher.add_handler(conv_handler)
         dispatcher.add_handler(edit_handler)
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         
-        # Обработчики главного меню
+        # Обработчики кнопок
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки)$'), handle_main_menu))
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки|📊 Статистика|🔧 Управление|📢 Сделать рассылку|🔄 Обновить счетчики|📁 Экспорт заявок|🔙 Назад в админ-панель|❌ Отменить рассылку)$'), 
             handle_admin_menu
         ))
         
-        # Обработчики callback для админ-панели (ОБНОВЛЕНЫ - добавлены новые callback)
+        # Обработчик рассылки
+        dispatcher.add_handler(MessageHandler(
+            Filters.text & ~Filters.command,
+            handle_broadcast_message
+        ))
+        
+        # Обработчики callback для админ-панели
         dispatcher.add_handler(CallbackQueryHandler(
             handle_admin_callback, 
             pattern='^(take_|complete_|message_|confirm_take_|cancel_take_|confirm_complete_|cancel_complete_)'
