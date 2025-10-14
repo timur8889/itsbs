@@ -88,9 +88,10 @@ edit_choice_keyboard = [
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
 
-# Админ-панель (НОВЫЕ ЗАЯВКИ И ВЫПОЛНЕННЫЕ)
+# Админ-панель (НОВЫЕ ЗАЯВКИ, В РАБОТЕ И ВЫПОЛНЕННЫЕ)
 admin_panel_keyboard = [
-    ['🆕 Новые заявки', '✅ Выполненные заявки']
+    ['🆕 Новые заявки', '🔄 В работе'],
+    ['✅ Выполненные заявки']
 ]
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -426,20 +427,22 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
 # ==================== АДМИН-ПАНЕЛЬ ====================
 
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    """Показывает админ-панель с новыми и выполненными заявками"""
+    """Показывает админ-панель с новыми, в работе и выполненными заявками"""
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
         update.message.reply_text("❌ У вас нет доступа к админ-панели.")
         return show_main_menu(update, context)
     
-    # Получаем количество новых и выполненных заявок
+    # Получаем количество заявок по статусам
     new_requests = db.get_requests_by_filter('new')
+    in_progress_requests = db.get_requests_by_filter('in_progress')
     completed_requests = db.get_requests_by_filter('completed')
     
     admin_text = (
         "👑 *Админ-панель завода Контакт*\n\n"
         f"🆕 *Новых заявок:* {len(new_requests)}\n"
+        f"🔄 *Заявок в работе:* {len(in_progress_requests)}\n"
         f"✅ *Выполненных заявок:* {len(completed_requests)}\n\n"
         "Выберите раздел для просмотра:"
     )
@@ -459,6 +462,7 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     requests = db.get_requests_by_filter(filter_type, 50)
     filter_names = {
         'new': '🆕 Новые заявки',
+        'in_progress': '🔄 Заявки в работе',
         'completed': '✅ Выполненные заявки'
     }
     filter_name = f"{filter_names[filter_type]} ({len(requests)})"
@@ -491,6 +495,20 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
                 f"🕒 *Создана:* {req['created_at'][:16]}\n"
                 f"✅ *Завершена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
             )
+        elif req['status'] == 'in_progress':
+            request_text = (
+                f"🔄 *Заявка #{req['id']} - В РАБОТЕ*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"👨‍💼 *Исполнитель:* {req.get('assigned_admin', 'Не назначен')}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"🔄 *Обновлена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
+            )
         else:
             request_text = (
                 f"🆕 *Заявка #{req['id']} - НОВАЯ*\n\n"
@@ -509,11 +527,25 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         
         # Определяем кнопки в зависимости от статуса заявки
         if req['status'] == 'completed':
-            # Для выполненных заявок - только кнопка "Связаться"
+            # Для выполненных заявок - только кнопки связи
             keyboard = [[
                 InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}"),
                 InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
             ]]
+        elif req['status'] == 'in_progress':
+            # Для заявок в работе
+            if req.get('assigned_admin') == update.message.from_user.first_name:
+                # Если текущий администратор - исполнитель
+                keyboard = [[
+                    InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}"),
+                    InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}")
+                ]]
+            else:
+                # Если заявка в работе у другого администратора
+                keyboard = [[
+                    InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{req['id']}"),
+                    InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+                ]]
         else:
             # Для новых заявок
             keyboard = [[
@@ -770,9 +802,12 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
     
     if text == '🆕 Новые заявки':
         return show_requests_by_filter(update, context, 'new')
+    elif text == '🔄 В работе':
+        return show_requests_by_filter(update, context, 'in_progress')
     elif text == '✅ Выполненные заявки':
         return show_requests_by_filter(update, context, 'completed')
 
+# Остальной код (создание заявки, редактирование и т.д.) остается без изменений
 # ==================== СОЗДАНИЕ ЗАЯВКИ ====================
 
 def start_request_creation(update: Update, context: CallbackContext) -> int:
@@ -1312,7 +1347,7 @@ def main() -> None:
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|✅ Выполненные заявки)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)$'), 
             handle_admin_menu
         ))
         
