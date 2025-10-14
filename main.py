@@ -6,7 +6,7 @@ import re
 import threading
 import shutil
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time  # Добавлен time
 from typing import Dict, List, Optional, Tuple, Any
 from telegram import (
     ReplyKeyboardMarkup,
@@ -1639,11 +1639,58 @@ def create_backup_command(update: Update, context: CallbackContext):
 def show_my_requests(update: Update, context: CallbackContext):
     """Показывает заявки пользователя"""
     user_id = update.message.from_user.id
-    # Реализация показа заявок пользователя
-    update.message.reply_text(
-        "📋 Функция показа заявок в разработке",
-        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
-    )
+    
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT * FROM requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 10',
+                (user_id,)
+            )
+            requests = cursor.fetchall()
+        
+        if not requests:
+            update.message.reply_text(
+                "📋 *Мои заявки*\n\nУ вас пока нет заявок.",
+                reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        text = "📋 *Мои последние заявки:*\n\n"
+        columns = ['id', 'status', 'plot', 'system_type', 'problem', 'created_at']
+        
+        for req in requests:
+            req_dict = dict(zip(columns, req))
+            created_time = datetime.fromisoformat(req_dict['created_at'])
+            time_str = created_time.strftime('%d.%m.%Y %H:%M')
+            
+            status_emoji = {
+                'new': '🆕',
+                'in_progress': '🔄', 
+                'completed': '✅'
+            }.get(req_dict['status'], '📄')
+            
+            text += (
+                f"{status_emoji} *Заявка #{req_dict['id']}*\n"
+                f"📍 {req_dict['plot']} | {req_dict['system_type']}\n"
+                f"📝 {req_dict['problem'][:50]}...\n"
+                f"🕒 {time_str} | {req_dict['status']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+            )
+        
+        update.message.reply_text(
+            text,
+            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения заявок пользователя: {e}")
+        update.message.reply_text(
+            "❌ Ошибка получения заявок",
+            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
+        )
 
 def show_statistics(update: Update, context: CallbackContext):
     """Показывает общую статистику"""
@@ -1710,7 +1757,13 @@ def handle_settings(update: Update, context: CallbackContext):
         return show_enhanced_admin_panel(update, context)
     elif text == '💾 Управление бэкапами':
         return show_backup_management(update, context)
-    # Добавьте обработку других настроек по необходимости
+    elif text == '📊 Общая статистика':
+        return show_statistics(update, context)
+    else:
+        update.message.reply_text(
+            "⚙️ Настройки в разработке",
+            reply_markup=ReplyKeyboardMarkup(settings_keyboard, resize_keyboard=True)
+        )
 
 def handle_backup_commands(update: Update, context: CallbackContext):
     """Обрабатывает команды управления бэкапами"""
@@ -1724,6 +1777,11 @@ def handle_backup_commands(update: Update, context: CallbackContext):
         return list_backups(update, context)
     elif text == '🧹 Очистить старые':
         return cleanup_backups(update, context)
+    else:
+        update.message.reply_text(
+            "💾 Функция в разработке",
+            reply_markup=ReplyKeyboardMarkup(backup_keyboard, resize_keyboard=True)
+        )
 
 def show_requests_by_filter(update: Update, context: CallbackContext, status: str):
     """Показывает заявки по фильтру"""
@@ -1821,39 +1879,45 @@ def enhanced_main() -> None:
         # Расширенные задания по расписанию
         job_queue = updater.job_queue
         if job_queue:
-            # Ежедневное резервное копирование
-            job_queue.run_daily(
-                backup_job, 
-                time=datetime.time(hour=AUTO_BACKUP_HOUR, minute=AUTO_BACKUP_MINUTE)
-            )
-            
-            # Ежечасная проверка срочных заявок
-            job_queue.run_repeating(
-                check_urgent_requests, 
-                interval=3600,  # 1 час
-                first=10
-            )
-            
-            # Обработка очереди уведомлений каждые 30 секунд
-            job_queue.run_repeating(
-                lambda context: notification_manager.process_queue(),
-                interval=30,
-                first=5
-            )
-            
-            # Еженедельная очистка старых бэкапов
-            job_queue.run_repeating(
-                lambda context: EnhancedBackupManager.cleanup_old_backups(),
-                interval=604800,  # 7 дней
-                first=3600
-            )
-            
-            # Очистка кэша каждые 10 минут
-            job_queue.run_repeating(
-                lambda context: cache_manager.clear_cache(),
-                interval=600,
-                first=300
-            )
+            try:
+                # Ежедневное резервное копирование
+                backup_time = time(hour=AUTO_BACKUP_HOUR, minute=AUTO_BACKUP_MINUTE)
+                job_queue.run_daily(backup_job, time=backup_time)
+                
+                # Ежечасная проверка срочных заявок
+                job_queue.run_repeating(
+                    check_urgent_requests, 
+                    interval=3600,  # 1 час
+                    first=10
+                )
+                
+                # Обработка очереди уведомлений каждые 30 секунд
+                job_queue.run_repeating(
+                    lambda context: notification_manager.process_queue(),
+                    interval=30,
+                    first=5
+                )
+                
+                # Еженедельная очистка старых бэкапов
+                job_queue.run_repeating(
+                    lambda context: EnhancedBackupManager.cleanup_old_backups(),
+                    interval=604800,  # 7 дней
+                    first=3600
+                )
+                
+                # Очистка кэша каждые 10 минут
+                job_queue.run_repeating(
+                    lambda context: cache_manager.clear_cache(),
+                    interval=600,
+                    first=300
+                )
+                
+                logger.info("✅ Все задания планировщика успешно зарегистрированы")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка регистрации заданий планировщика: {e}")
+        else:
+            logger.warning("⚠️ JobQueue недоступен - отключены автоматические задачи")
 
         # Обработчик создания заявки (сохраняем старый)
         conv_handler = ConversationHandler(
