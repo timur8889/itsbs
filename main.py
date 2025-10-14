@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('Agg')  # Для работы без GUI
+from matplotlib import pyplot as plt
 import logging
 import sqlite3
 import os
