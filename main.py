@@ -35,8 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-ADMIN_CHAT_IDS = [5024165375]  # Замените на реальные chat_id админов
-BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"  # Замените на реальный токен бота
+ADMIN_CHAT_IDS = [5024165375]
+BOT_TOKEN = "7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw"
 
 # Определяем этапы разговора
 NAME, PHONE, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD, OTHER_PLOT = range(10)
@@ -46,24 +46,20 @@ DB_PATH = "requests.db"
 
 # ==================== КЛАВИАТУРЫ ====================
 
-# Главное меню пользователя
 user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки']
 ]
 
-# Главное меню администратора
 admin_main_menu_keyboard = [
     ['👑 Админ-панель']
 ]
 
-# Меню создания заявки
 create_request_keyboard = [
     ['📹 Видеонаблюдение', '🔐 СКУД'],
     ['🌐 Компьютерная сеть', '🚨 Пожарная сигнализация'],
     ['🔙 Назад в меню']
 ]
 
-# Клавиатуры для этапов заявки
 confirm_keyboard = [['✅ Подтвердить отправку', '✏️ Редактировать заявку']]
 photo_keyboard = [['📷 Добавить фото', '⏭️ Пропустить фото']]
 urgency_keyboard = [
@@ -78,7 +74,6 @@ plot_type_keyboard = [
     ['🔙 Назад']
 ]
 
-# Клавиатуры для редактирования
 edit_choice_keyboard = [
     ['📛 Редактировать имя', '📞 Редактировать телефон'],
     ['📍 Редактировать участок', '🔧 Редактировать систему'],
@@ -88,7 +83,6 @@ edit_choice_keyboard = [
 
 edit_field_keyboard = [['🔙 Назад к редактированию']]
 
-# Админ-панель (НОВЫЕ ЗАЯВКИ, В РАБОТЕ И ВЫПОЛНЕННЫЕ)
 admin_panel_keyboard = [
     ['🆕 Новые заявки', '🔄 В работе'],
     ['✅ Выполненные заявки']
@@ -166,14 +160,12 @@ class Database:
             ))
             request_id = cursor.lastrowid
             
-            # Обновляем статистику
             today = datetime.now().strftime('%Y-%m-%d')
             cursor.execute('''
                 INSERT OR REPLACE INTO statistics (date, requests_count)
                 VALUES (?, COALESCE((SELECT requests_count FROM statistics WHERE date = ?), 0) + 1)
             ''', (today, today))
             
-            # Обновляем информацию о пользователе
             cursor.execute('''
                 INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, created_at, request_count)
                 VALUES (?, ?, ?, ?, ?, COALESCE((SELECT request_count FROM users WHERE user_id = ?), 0) + 1)
@@ -211,11 +203,9 @@ class Database:
                 status_filter = "status = 'new'"
             elif filter_type == 'in_progress':
                 status_filter = "status = 'in_progress'"
-            elif filter_type == 'urgent':
-                status_filter = "urgency LIKE '%Срочно%' AND status IN ('new', 'in_progress')"
             elif filter_type == 'completed':
                 status_filter = "status = 'completed'"
-            else:  # all active
+            else:
                 status_filter = "status IN ('new', 'in_progress')"
             
             cursor.execute(f'''
@@ -271,25 +261,6 @@ class Database:
             
             conn.commit()
 
-    def get_my_in_progress_requests(self, admin_name: str, limit: int = 50) -> List[Dict]:
-        """Получает заявки, которые взял в работу конкретный администратор"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM requests 
-                WHERE assigned_admin = ? AND status = 'in_progress'
-                ORDER BY 
-                    CASE urgency 
-                        WHEN '🔴 Срочно (2 часа)' THEN 1
-                        WHEN '🟡 Средняя (сегодня)' THEN 2
-                        ELSE 3
-                    END,
-                    created_at DESC
-                LIMIT ?
-            ''', (admin_name, limit))
-            columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
 # Инициализация базы данных
 db = Database(DB_PATH)
 
@@ -300,9 +271,7 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
     user = update.message.from_user
     user_id = user.id
     
-    # Определяем клавиатуру в зависимости от прав
     if user_id in ADMIN_CHAT_IDS:
-        # Администратору показываем сразу админ-панель
         return show_admin_panel(update, context)
     else:
         keyboard = user_main_menu_keyboard
@@ -323,12 +292,10 @@ def show_main_menu(update: Update, context: CallbackContext) -> None:
     )
 
 def show_my_requests(update: Update, context: CallbackContext) -> None:
-    """Показывает заявки пользователя с разделением по статусам"""
+    """Показывает заявки пользователя"""
     user_id = update.message.from_user.id
     
-    # Определяем клавиатуру в зависимости от прав
     if user_id in ADMIN_CHAT_IDS:
-        # Администратору показываем админ-панель
         return show_admin_panel(update, context)
     else:
         keyboard = user_main_menu_keyboard
@@ -343,7 +310,6 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
         )
         return
     
-    # Разделяем заявки по статусам
     active_requests = [req for req in requests if req['status'] != 'completed']
     completed_requests = [req for req in requests if req['status'] == 'completed']
     
@@ -355,7 +321,6 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
         )
         return
     
-    # Показываем активные заявки
     if active_requests:
         update.message.reply_text(
             f"📋 *Ваши активные заявки ({len(active_requests)}):*",
@@ -389,7 +354,6 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
             
             update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
     
-    # Показываем выполненные заявки отдельно
     if completed_requests:
         update.message.reply_text(
             f"✅ *История выполненных заявок ({len(completed_requests)}):*",
@@ -416,7 +380,6 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
             
             update.message.reply_text(request_text, parse_mode=ParseMode.MARKDOWN)
     
-    # Итоговое сообщение
     total_text = f"📊 *Итого:* {len(active_requests)} активных, {len(completed_requests)} выполненных заявок"
     update.message.reply_text(
         total_text,
@@ -427,14 +390,13 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
 # ==================== АДМИН-ПАНЕЛЬ ====================
 
 def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    """Показывает админ-панель с новыми, в работе и выполненными заявками"""
+    """Показывает админ-панель"""
     user_id = update.message.from_user.id
     
     if user_id not in ADMIN_CHAT_IDS:
         update.message.reply_text("❌ У вас нет доступа к админ-панели.")
         return show_main_menu(update, context)
     
-    # Получаем количество заявок по статусам
     new_requests = db.get_requests_by_filter('new')
     in_progress_requests = db.get_requests_by_filter('in_progress')
     completed_requests = db.get_requests_by_filter('completed')
@@ -480,7 +442,6 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
     )
     
     for req in requests:
-        # Определяем текст в зависимости от статуса заявки
         if req['status'] == 'completed':
             request_text = (
                 f"✅ *Заявка #{req['id']} - ВЫПОЛНЕНА*\n\n"
@@ -525,31 +486,25 @@ def show_requests_by_filter(update: Update, context: CallbackContext, filter_typ
         if req.get('admin_comment'):
             request_text += f"\n💬 *Комментарий администратора:* {req['admin_comment']}"
         
-        # Определяем кнопки в зависимости от статуса заявки (УДАЛЕНА КНОПКА "ПОЗВОНИТЬ")
+        # Кнопки без "Позвонить"
         if req['status'] == 'completed':
-            # Для выполненных заявок - только кнопка "Написать"
             keyboard = [[
                 InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
             ]]
         elif req['status'] == 'in_progress':
-            # Для заявок в работе
             if req.get('assigned_admin') == update.message.from_user.first_name:
-                # Если текущий администратор - исполнитель
                 keyboard = [[
                     InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}")
                 ]]
             else:
-                # Если заявка в работе у другого администратора
                 keyboard = [[
                     InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
                 ]]
         else:
-            # Для новых заявок
             keyboard = [[
                 InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}")
             ]]
         
-        # Отправляем заявку с фото или без
         if req.get('photo'):
             update.message.reply_photo(
                 photo=req['photo'],
@@ -579,7 +534,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         request_id = int(data.split('_')[1])
         admin_name = query.from_user.first_name
         
-        # Обновляем статус заявки и назначаем администратора
         db.update_request_status(
             request_id, 
             "in_progress", 
@@ -587,7 +541,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             admin_name
         )
         
-        # Получаем информацию о заявке для уведомления пользователя
         request = db.get_request(request_id)
         if request and request.get('user_id'):
             try:
@@ -601,7 +554,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             except Exception as e:
                 logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
         
-        # Обновляем сообщение с заявкой
         request_text = (
             f"✅ *Заявка #{request_id} взята вами в работу!*\n\n"
             f"👤 *Клиент:* {request['name']}\n"
@@ -614,7 +566,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"👨‍💼 *Исполнитель:* {admin_name}"
         )
         
-        # Обновляем inline-клавиатуру - добавляем кнопку "Выполнено"
         keyboard = [[
             InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}")
         ]]
@@ -636,7 +587,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         request_id = int(data.split('_')[1])
         admin_name = query.from_user.first_name
         
-        # Обновляем статус заявки на "выполнено"
         db.update_request_status(
             request_id, 
             "completed", 
@@ -644,7 +594,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             admin_name
         )
         
-        # Получаем информацию о заявке для уведомления пользователя
         request = db.get_request(request_id)
         if request and request.get('user_id'):
             try:
@@ -659,7 +608,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             except Exception as e:
                 logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
         
-        # Обновляем сообщение с заявкой
         request_text = (
             f"✅ *Заявка #{request_id} ВЫПОЛНЕНА!*\n\n"
             f"👤 *Клиент:* {request['name']}\n"
@@ -675,7 +623,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             f"🕒 *Завершена:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         
-        # Обновляем inline-клавиатуру для выполненных заявок
         keyboard = [[
             InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
         ]]
@@ -693,7 +640,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
         
-        # Отправляем подтверждение администратору
         query.answer("✅ Заявка выполнена!")
     
     elif data.startswith('message_'):
@@ -701,10 +647,8 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
         request = db.get_request(request_id)
         
         if request:
-            # Очищаем номер телефона от лишних символов
             phone_number = request['phone'].replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
             
-            # Создаем кнопку для написания сообщения
             message_button = InlineKeyboardButton(
                 "💬 Написать сообщение", 
                 url=f"https://t.me/{phone_number}" if phone_number.startswith('+') else f"https://t.me/{phone_number}"
@@ -722,7 +666,6 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
             
             query.answer("💬 Открывается чат...")
             
-            # Отправляем отдельное сообщение с кнопкой для сообщения
             context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=contact_text,
@@ -737,11 +680,9 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
     text = update.message.text
     user_id = update.message.from_user.id
     
-    # Для администраторов показываем только админ-панель
     if user_id in ADMIN_CHAT_IDS:
         return show_admin_panel(update, context)
     
-    # Для обычных пользователей
     if text == '📝 Создать заявку':
         return start_request_creation(update, context)
     elif text == '📋 Мои заявки':
@@ -1015,11 +956,9 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
     editing_field = context.user_data.get('editing_field')
     text = update.message.text
     
-    # Обработка кнопки "Назад"
     if text == '🔙 Назад к редактированию':
         return edit_request_choice(update, context)
     
-    # Обработка фото
     if update.message.photo:
         context.user_data['photo'] = update.message.photo[-1].file_id
         update.message.reply_text(
@@ -1028,7 +967,6 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
         )
         return edit_request_choice(update, context)
     
-    # Обработка текстовых полей
     if editing_field == '📛 Редактировать имя':
         context.user_data['name'] = text
         update.message.reply_text(
@@ -1053,6 +991,8 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
                 reply_markup=ReplyKeyboardMarkup([['🔙 Назад к редактированию']], resize_keyboard=True),
                 parse_mode=ParseMode.MARKDOWN
             )
+            # Сохраняем информацию о том, что мы в режиме редактирования
+            context.user_data['editing_other_plot'] = True
             return OTHER_PLOT
         
         context.user_data['plot'] = text
@@ -1109,7 +1049,6 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
             )
             return EDIT_FIELD
     
-    # Обновляем сводку
     context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
     update_summary(context)
     return edit_request_choice(update, context)
@@ -1137,12 +1076,9 @@ def show_request_summary(update: Update, context: CallbackContext) -> int:
     context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
     update_summary(context)
     
-    # Определяем, откуда пришли - из создания или редактирования
     if context.user_data.get('editing_mode'):
-        # Режим редактирования - показываем меню редактирования
         return edit_request_choice(update, context)
     else:
-        # Режим создания - показываем подтверждение
         if context.user_data.get('photo'):
             update.message.reply_photo(
                 photo=context.user_data['photo'],
@@ -1164,13 +1100,9 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
         user = update.message.from_user
         
         try:
-            # Сохраняем заявку в базу данных
             request_id = db.save_request(context.user_data)
-            
-            # Отправляем уведомление администраторам
             send_admin_notification(context, context.user_data, request_id)
             
-            # Подтверждение пользователю
             confirmation_text = (
                 f"✅ *Заявка #{request_id} успешно создана!*\n\n"
                 f"📞 Наш специалист свяжется с вами в ближайшее время.\n"
@@ -1178,9 +1110,7 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
                 f"_Спасибо за обращение в службу слаботочных систем завода Контакт!_ 🛠️"
             )
             
-            # Определяем клавиатуру в зависимости от прав
             if user.id in ADMIN_CHAT_IDS:
-                # Администратору показываем админ-панель
                 update.message.reply_text(
                     confirmation_text,
                     reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
@@ -1198,7 +1128,6 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
         except Exception as e:
             logger.error(f"Ошибка при сохранении заявки: {e}")
             
-            # Определяем клавиатуру в зависимости от прав
             if user.id in ADMIN_CHAT_IDS:
                 update.message.reply_text(
                     "❌ *Произошла ошибка при создании заявки.*\n\nПожалуйста, попробуйте позже.",
@@ -1215,7 +1144,6 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
         context.user_data.clear()
         
     elif update.message.text == '✏️ Редактировать заявку':
-        # Включаем режим редактирования
         context.user_data['editing_mode'] = True
         return edit_request_choice(update, context)
 
@@ -1257,7 +1185,6 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     user_id = update.message.from_user.id
     
     if user_id in ADMIN_CHAT_IDS:
-        # Администратору показываем админ-панель
         update.message.reply_text(
             "❌ Создание заявки отменено.",
             reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
@@ -1270,13 +1197,6 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     
     context.user_data.clear()
     return ConversationHandler.END
-
-def cancel_editing(update: Update, context: CallbackContext) -> int:
-    """Отменяет редактирование и возвращает к подтверждению"""
-    context.user_data.pop('editing_mode', None)
-    context.user_data.pop('editing_field', None)
-    
-    return show_request_summary(update, context)
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
@@ -1316,7 +1236,6 @@ def main() -> None:
             fallbacks=[
                 CommandHandler('cancel', cancel_request),
                 MessageHandler(Filters.regex('^(🔙 Назад в меню)$'), cancel_request),
-                MessageHandler(Filters.regex('^(✅ Завершить редактирование)$'), show_request_summary)
             ],
             allow_reentry=True
         )
@@ -1337,49 +1256,26 @@ def main() -> None:
         dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
         
         # Обработчики главного меню
-        dispatcherботчики главного меню
-       .add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
-        
-        # Обработчики админ-панели
-        dispatcher.add_handler_menu))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.re(MessageHandler(
-            Filters.regex('^(🆕 Новые заgex('^(🆕 Новые заявки|🔄 В работе|✅ Выявки|🔄 В работе|✅ Выполненные заявки)$'), 
-            handle_admin_menu
-полненные заявки)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)$'), 
             handle_admin_menu
         ))
         
-        # Обработчики callback для админ-панели        ))
-        
         # Обработчики callback для админ-панели
-        dispatcher.add_handler
-        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback,(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message pattern='^(take_|complete_|message_)'))
-
-        # Запускаем бота_)'))
+        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message_)'))
 
         # Запускаем бота
-        logger
-        logger.info("🤖 Бот запущен с визу.info("🤖 Бот запущен с визуальным меню!")
-        logger.info(f"👑 Администраальным меню!")
-        logger.info(f"👑 Администраторы: {ADMIN_CHторы: {ADMIN_CHAT_IDS}")
-        
-        updaterAT_IDS}")
+        logger.info("🤖 Бот запущен с визуальным меню!")
+        logger.info(f"👑 Администраторы: {ADMIN_CHAT_IDS}")
         
         updater.start_polling()
-        updater.idle.start_polling()
         updater.idle()
-
-    except Exception as e:
-       ()
 
     except Exception as e:
         logger.error(f"❌ Ошибка запуска бота: {e}")
 
-if __ logger.error(f"❌ Ошибка запуска бота: {e}")
-
 if __name__ == '__main__':
     main()
-name__ == '__main__':
