@@ -48,7 +48,7 @@ DB_PATH = "requests.db"
 
 user_main_menu_keyboard = [
     ['📝 Создать заявку', '📋 Мои заявки'],
-    ['✏️ Редактировать заявку']  # Новая кнопка редактирования
+    ['✏️ Редактировать заявку']
 ]
 
 admin_main_menu_keyboard = [
@@ -457,9 +457,12 @@ def show_request_summary(update: Update, context: CallbackContext) -> int:
     context.user_data['timestamp'] = datetime.now().strftime("%d.%m.%Y %H:%M")
     update_summary(context)
     
+    # Определяем, откуда пришли - из создания или редактирования
     if context.user_data.get('editing_mode'):
+        # Режим редактирования - показываем меню редактирования
         return edit_request_choice(update, context)
     else:
+        # Режим создания - показываем подтверждение
         if context.user_data.get('photo'):
             update.message.reply_photo(
                 photo=context.user_data['photo'],
@@ -543,6 +546,7 @@ def confirm_request(update: Update, context: CallbackContext) -> None:
         context.user_data.clear()
         
     elif update.message.text == '✏️ Редактировать заявку':
+        # Включаем режим редактирования
         context.user_data['editing_mode'] = True
         return edit_request_choice(update, context)
 
@@ -717,6 +721,18 @@ def show_edit_summary(update: Update, context: CallbackContext) -> int:
     
     return EDIT_CHOICE
 
+def edit_request_choice(update: Update, context: CallbackContext) -> int:
+    """Показывает меню выбора поля для редактирования (для создания заявки)"""
+    summary = context.user_data.get('summary', '')
+    
+    update.message.reply_text(
+        f"{summary}\n\n"
+        "✏️ *Выберите поле для редактирования:*",
+        reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return EDIT_CHOICE
+
 def handle_edit_choice(update: Update, context: CallbackContext) -> int:
     """Обрабатывает выбор поля для редактирования"""
     choice = update.message.text
@@ -783,7 +799,10 @@ def handle_edit_choice(update: Update, context: CallbackContext) -> int:
         return EDIT_FIELD
         
     elif choice == '✅ Завершить редактирование':
-        return save_edited_request(update, context)
+        if context.user_data.get('editing_existing'):
+            return save_edited_request(update, context)
+        else:
+            return show_request_summary(update, context)
     
     else:
         update.message.reply_text(
@@ -799,7 +818,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
     
     # Обработка кнопки "Назад"
     if text == '🔙 Назад к редактированию':
-        return show_edit_summary(update, context)
+        if context.user_data.get('editing_existing'):
+            return show_edit_summary(update, context)
+        else:
+            return edit_request_choice(update, context)
     
     # Обработка фото
     if update.message.photo:
@@ -808,7 +830,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
             "✅ Фото обновлено!",
             reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
         )
-        return show_edit_summary(update, context)
+        if context.user_data.get('editing_existing'):
+            return show_edit_summary(update, context)
+        else:
+            return edit_request_choice(update, context)
     
     # Обработка текстовых полей
     if editing_field == '📛 Редактировать имя':
@@ -827,7 +852,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
         
     elif editing_field == '📍 Редактировать участок':
         if text in ['🔙 Назад', '🔙 Назад в меню']:
-            return show_edit_summary(update, context)
+            if context.user_data.get('editing_existing'):
+                return show_edit_summary(update, context)
+            else:
+                return edit_request_choice(update, context)
         
         if text == '📦 Другой участок':
             update.message.reply_text(
@@ -846,7 +874,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
         
     elif editing_field == '🔧 Редактировать систему':
         if text in ['🔙 Назад', '🔙 Назад в меню']:
-            return show_edit_summary(update, context)
+            if context.user_data.get('editing_existing'):
+                return show_edit_summary(update, context)
+            else:
+                return edit_request_choice(update, context)
         context.user_data['system_type'] = text
         update.message.reply_text(
             "✅ Система обновлена!",
@@ -862,7 +893,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
         
     elif editing_field == '⏰ Редактировать срочность':
         if text == '🔙 Назад':
-            return show_edit_summary(update, context)
+            if context.user_data.get('editing_existing'):
+                return show_edit_summary(update, context)
+            else:
+                return edit_request_choice(update, context)
         context.user_data['urgency'] = text
         update.message.reply_text(
             "✅ Срочность обновлена!",
@@ -892,7 +926,10 @@ def handle_edit_field(update: Update, context: CallbackContext) -> int:
             )
             return EDIT_FIELD
     
-    return show_edit_summary(update, context)
+    if context.user_data.get('editing_existing'):
+        return show_edit_summary(update, context)
+    else:
+        return edit_request_choice(update, context)
 
 def save_edited_request(update: Update, context: CallbackContext) -> int:
     """Сохраняет отредактированную заявку"""
@@ -1007,14 +1044,21 @@ def cancel_edit(update: Update, context: CallbackContext) -> int:
 def other_plot_edit(update: Update, context: CallbackContext) -> int:
     """Обрабатывает ввод пользовательского участка в режиме редактирования"""
     if update.message.text == '🔙 Назад к редактированию':
-        return show_edit_summary(update, context)
+        if context.user_data.get('editing_existing'):
+            return show_edit_summary(update, context)
+        else:
+            return edit_request_choice(update, context)
     
     context.user_data['plot'] = update.message.text
     update.message.reply_text(
         "✅ Участок обновлен!",
         reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True)
     )
-    return show_edit_summary(update, context)
+    
+    if context.user_data.get('editing_existing'):
+        return show_edit_summary(update, context)
+    else:
+        return edit_request_choice(update, context)
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
@@ -1214,6 +1258,11 @@ def main() -> None:
                     MessageHandler(Filters.text & ~Filters.command, photo),
                     MessageHandler(Filters.photo, photo)
                 ],
+                EDIT_CHOICE: [MessageHandler(Filters.text & ~Filters.command, handle_edit_choice)],
+                EDIT_FIELD: [
+                    MessageHandler(Filters.text & ~Filters.command, handle_edit_field),
+                    MessageHandler(Filters.photo, handle_edit_field)
+                ],
             },
             fallbacks=[
                 CommandHandler('cancel', cancel_request),
@@ -1250,6 +1299,10 @@ def main() -> None:
         
         dispatcher.add_handler(conv_handler)
         dispatcher.add_handler(edit_conv_handler)
+        
+        # Обработчики для кнопок подтверждения и редактирования
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(✅ Подтвердить отправку)$'), confirm_request))
+        dispatcher.add_handler(MessageHandler(Filters.regex('^(✏️ Редактировать заявку)$'), confirm_request))
         
         # Обработчики главного меню
         dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
