@@ -1060,6 +1060,307 @@ def other_plot_edit(update: Update, context: CallbackContext) -> int:
     else:
         return edit_request_choice(update, context)
 
+# ==================== АДМИН-ПАНЕЛЬ ====================
+
+def show_admin_panel(update: Update, context: CallbackContext) -> None:
+    """Показывает админ-панель"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        update.message.reply_text("❌ У вас нет доступа к админ-панели.")
+        return show_main_menu(update, context)
+    
+    new_requests = db.get_requests_by_filter('new')
+    in_progress_requests = db.get_requests_by_filter('in_progress')
+    completed_requests = db.get_requests_by_filter('completed')
+    
+    admin_text = (
+        "👑 *Админ-панель завода Контакт*\n\n"
+        f"🆕 *Новых заявок:* {len(new_requests)}\n"
+        f"🔄 *Заявок в работе:* {len(in_progress_requests)}\n"
+        f"✅ *Выполненных заявок:* {len(completed_requests)}\n\n"
+        "Выберите раздел для просмотра:"
+    )
+    
+    update.message.reply_text(
+        admin_text,
+        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+def show_requests_by_filter(update: Update, context: CallbackContext, filter_type: str) -> None:
+    """Показывает заявки по фильтру"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    requests = db.get_requests_by_filter(filter_type, 50)
+    filter_names = {
+        'new': '🆕 Новые заявки',
+        'in_progress': '🔄 Заявки в работе',
+        'completed': '✅ Выполненные заявки'
+    }
+    filter_name = f"{filter_names[filter_type]} ({len(requests)})"
+    
+    if not requests:
+        update.message.reply_text(
+            f"📭 {filter_name} отсутствуют.",
+            reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+        )
+        return
+    
+    update.message.reply_text(
+        filter_name,
+        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True)
+    )
+    
+    for req in requests:
+        if req['status'] == 'completed':
+            request_text = (
+                f"✅ *Заявка #{req['id']} - ВЫПОЛНЕНА*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"👨‍💼 *Исполнитель:* {req.get('assigned_admin', 'Не назначен')}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"✅ *Завершена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
+            )
+        elif req['status'] == 'in_progress':
+            request_text = (
+                f"🔄 *Заявка #{req['id']} - В РАБОТЕ*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"👨‍💼 *Исполнитель:* {req.get('assigned_admin', 'Не назначен')}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}\n"
+                f"🔄 *Обновлена:* {req['updated_at'][:16] if req.get('updated_at') else req['created_at'][:16]}"
+            )
+        else:
+            request_text = (
+                f"🆕 *Заявка #{req['id']} - НОВАЯ*\n\n"
+                f"👤 *Клиент:* {req['name']}\n"
+                f"📞 *Телефон:* `{req['phone']}`\n"
+                f"📍 *Участок:* {req['plot']}\n"
+                f"🔧 *Тип системы:* {req['system_type']}\n"
+                f"⏰ *Срочность:* {req['urgency']}\n"
+                f"📝 *Описание:* {req['problem']}\n"
+                f"📸 *Фото:* {'✅ Есть' if req['photo'] else '❌ Нет'}\n"
+                f"🕒 *Создана:* {req['created_at'][:16]}"
+            )
+        
+        if req.get('admin_comment'):
+            request_text += f"\n💬 *Комментарий администратора:* {req['admin_comment']}"
+        
+        # Кнопки без "Позвонить"
+        if req['status'] == 'completed':
+            keyboard = [[
+                InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+            ]]
+        elif req['status'] == 'in_progress':
+            if req.get('assigned_admin') == update.message.from_user.first_name:
+                keyboard = [[
+                    InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{req['id']}")
+                ]]
+            else:
+                keyboard = [[
+                    InlineKeyboardButton("💬 Написать", callback_data=f"message_{req['id']}")
+                ]]
+        else:
+            keyboard = [[
+                InlineKeyboardButton("✅ Взять в работу", callback_data=f"take_{req['id']}")
+            ]]
+        
+        if req.get('photo'):
+            update.message.reply_photo(
+                photo=req['photo'],
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            update.message.reply_text(
+                request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+def handle_admin_callback(update: Update, context: CallbackContext) -> None:
+    """Обработчик callback от админ-кнопок"""
+    query = update.callback_query
+    query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        return
+    
+    if data.startswith('take_'):
+        request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        db.update_request_status(
+            request_id, 
+            "in_progress", 
+            f"Заявка взята в работу администратором {admin_name}",
+            admin_name
+        )
+        
+        request = db.get_request(request_id)
+        if request and request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"🔄 *Ваша заявка #{request_id} взята в работу!*\n\n"
+                         f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                         f"📞 С вами свяжутся в ближайшее время.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
+        
+        request_text = (
+            f"✅ *Заявка #{request_id} взята вами в работу!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n\n"
+            f"🔄 *Статус:* В работе\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data.startswith('complete_'):
+        request_id = int(data.split('_')[1])
+        admin_name = query.from_user.first_name
+        
+        db.update_request_status(
+            request_id, 
+            "completed", 
+            f"Заявка выполнена администратором {admin_name}",
+            admin_name
+        )
+        
+        request = db.get_request(request_id)
+        if request and request.get('user_id'):
+            try:
+                context.bot.send_message(
+                    chat_id=request['user_id'],
+                    text=f"✅ *Ваша заявка #{request_id} выполнена!*\n\n"
+                         f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                         f"💬 *Комментарий:* Заявка выполнена\n\n"
+                         f"_Спасибо, что воспользовались нашими услугами!_ 🛠️",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
+        
+        request_text = (
+            f"✅ *Заявка #{request_id} ВЫПОЛНЕНА!*\n\n"
+            f"👤 *Клиент:* {request['name']}\n"
+            f"📞 *Телефон:* `{request['phone']}`\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"🔧 *Тип системы:* {request['system_type']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem']}\n"
+            f"📸 *Фото:* {'✅ Есть' if request['photo'] else '❌ Нет'}\n\n"
+            f"✅ *Статус:* Выполнено\n"
+            f"👨‍💼 *Исполнитель:* {admin_name}\n"
+            f"💬 *Комментарий:* Заявка выполнена\n"
+            f"🕒 *Завершена:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        keyboard = [[
+            InlineKeyboardButton("💬 Написать", callback_data=f"message_{request_id}")
+        ]]
+        
+        if query.message.caption:
+            query.edit_message_caption(
+                caption=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            query.edit_message_text(
+                text=request_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        query.answer("✅ Заявка выполнена!")
+    
+    elif data.startswith('message_'):
+        request_id = int(data.split('_')[1])
+        request = db.get_request(request_id)
+        
+        if request:
+            phone_number = request['phone'].replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+            
+            message_button = InlineKeyboardButton(
+                "💬 Написать сообщение", 
+                url=f"https://t.me/{phone_number}" if phone_number.startswith('+') else f"https://t.me/{phone_number}"
+            )
+            
+            contact_text = (
+                f"💬 *Контактная информация по заявке #{request_id}*\n\n"
+                f"👤 *Клиент:* {request['name']}\n"
+                f"📞 *Телефон:* `{request['phone']}`\n"
+                f"📍 *Участок:* {request['plot']}\n"
+                f"🔧 *Тип системы:* {request['system_type']}\n"
+                f"⏰ *Срочность:* {request['urgency']}\n\n"
+                f"_Нажмите кнопку ниже для написания сообщения в Telegram_"
+            )
+            
+            query.answer("💬 Открывается чат...")
+            
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=contact_text,
+                reply_markup=InlineKeyboardMarkup([[message_button]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+def handle_admin_menu(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает выбор в админ-меню"""
+    text = update.message.text
+    user_id = update.message.from_user.id
+    
+    if user_id not in ADMIN_CHAT_IDS:
+        return show_main_menu(update, context)
+    
+    if text == '🆕 Новые заявки':
+        return show_requests_by_filter(update, context, 'new')
+    elif text == '🔄 В работе':
+        return show_requests_by_filter(update, context, 'in_progress')
+    elif text == '✅ Выполненные заявки':
+        return show_requests_by_filter(update, context, 'completed')
+
 # ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 
 def show_main_menu(update: Update, context: CallbackContext) -> None:
@@ -1203,32 +1504,6 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
             reply_markup=ReplyKeyboardMarkup(user_main_menu_keyboard, resize_keyboard=True)
         )
 
-def show_admin_panel(update: Update, context: CallbackContext) -> None:
-    """Показывает админ-панель"""
-    user_id = update.message.from_user.id
-    
-    if user_id not in ADMIN_CHAT_IDS:
-        update.message.reply_text("❌ У вас нет доступа к админ-панели.")
-        return show_main_menu(update, context)
-    
-    new_requests = db.get_requests_by_filter('new')
-    in_progress_requests = db.get_requests_by_filter('in_progress')
-    completed_requests = db.get_requests_by_filter('completed')
-    
-    admin_text = (
-        "👑 *Админ-панель завода Контакт*\n\n"
-        f"🆕 *Новых заявок:* {len(new_requests)}\n"
-        f"🔄 *Заявок в работе:* {len(in_progress_requests)}\n"
-        f"✅ *Выполненных заявок:* {len(completed_requests)}\n\n"
-        "Выберите раздел для просмотра:"
-    )
-    
-    update.message.reply_text(
-        admin_text,
-        reply_markup=ReplyKeyboardMarkup(admin_panel_keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
 # ==================== ОСНОВНЫЕ ФУНКЦИИ БОТА ====================
 
 def main() -> None:
@@ -1307,6 +1582,15 @@ def main() -> None:
         # Обработчики главного меню
         dispatcher.add_handler(MessageHandler(Filters.regex('^(📋 Мои заявки|👑 Админ-панель)$'), handle_main_menu))
         
+        # Обработчики админ-панели
+        dispatcher.add_handler(MessageHandler(
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)$'), 
+            handle_admin_menu
+        ))
+        
+        # Обработчики callback для админ-панели
+        dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message_)'))
+
         # Запускаем бота
         logger.info("🤖 Бот запущен с функцией редактирования заявок!")
         logger.info(f"👑 Администраторы: {ADMIN_CHAT_IDS}")
