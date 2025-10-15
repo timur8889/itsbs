@@ -609,7 +609,7 @@ def handle_admin_callback(update: Update, context: CallbackContext) -> None:
                 logger.error(f"Не удалось уведомить пользователя {request['user_id']}: {e}")
         
         request_text = (
-            f"✅ *Заявка #{request_id} ВЫПОЛНЕНА!*\n\n"
+            f"✅ *Заявка #{request_id} ВЫПОЛНЕНA!*\n\n"
             f"👤 *Клиент:* {request['name']}\n"
             f"📞 *Телефон:* `{request['phone']}`\n"
             f"📍 *Участок:* {request['plot']}\n"
