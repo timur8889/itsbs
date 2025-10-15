@@ -1,4 +1,3 @@
-Улучшенный бот слаботочки
 import logging
 import sqlite3
 import os
