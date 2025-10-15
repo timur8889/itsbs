@@ -13,7 +13,7 @@ import psutil
 import matplotlib
 matplotlib.use('Agg')  # Для работы без GUI
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple, Any
 from telegram import (
     ReplyKeyboardMarkup,
@@ -95,23 +95,176 @@ DB_PATH = "requests.db"
 BACKUP_DIR = "backups"
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
+# ==================== ДЕКОРАТОР БЕЗОПАСНОГО ВЫПОЛНЕНИЯ ====================
+
+def safe_execute(default_response="Произошла ошибка"):
+    """Декоратор для безопасного выполнения функций"""
+    def decorator(func):
+        def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+            try:
+                return func(update, context, *args, **kwargs)
+            except Exception as e:
+                logger.error(f"Ошибка в {func.__name__}: {e}", exc_info=True)
+                
+                if update and update.message:
+                    update.message.reply_text(
+                        default_response,
+                        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
+                    )
+                
+                # Уведомление админам об критической ошибке
+                for admin_id in ADMIN_CHAT_IDS[:3]:  # Первым трем админам
+                    try:
+                        context.bot.send_message(
+                            admin_id,
+                            f"🚨 Критическая ошибка в {func.__name__}: {str(e)[:100]}..."
+                        )
+                    except:
+                        pass
+                
+                return ConversationHandler.END
+        return wrapper
+    return decorator
+
+# ==================== УЛУЧШЕННЫЕ ВАЛИДАТОРЫ ====================
+
+class EnhancedValidators:
+    @staticmethod
+    def validate_phone(phone: str) -> bool:
+        return bool(re.match(r'^[\d\s\-\+\(\)]{7,20}$', phone.strip()))
+    
+    @staticmethod
+    def validate_name(name: str) -> bool:
+        return bool(re.match(r'^[А-Яа-яA-Za-z\s]{2,50}$', name.strip()))
+    
+    @staticmethod
+    def validate_plot(plot: str) -> bool:
+        return bool(re.match(r'^[А-Яа-яA-Za-z0-9\s\-]{2,20}$', plot.strip()))
+    
+    @staticmethod
+    def sanitize_input(text: str, max_length: int = 500) -> str:
+        """Очищает пользовательский ввод"""
+        if not text:
+            return ""
+        
+        # Удаляем опасные символы и ограничиваем длину
+        sanitized = re.sub(r'[<>{}\[\]]', '', text)
+        return sanitized[:max_length]
+    
+    @staticmethod
+    def validate_problem_text(text: str) -> Tuple[bool, str]:
+        """Проверяет текст проблемы"""
+        if len(text) < 5:
+            return False, "Слишком короткое описание проблемы"
+        
+        if len(text) > 1000:
+            return False, "Слишком длинное описание проблемы"
+        
+        # Проверка на спам
+        spam_keywords = ['http://', 'https://', '[url]', 'купить', 'цена']
+        if any(keyword in text.lower() for keyword in spam_keywords):
+            return False, "Обнаружены запрещенные слова в описании"
+        
+        return True, ""
+
+# ==================== УЛУЧШЕННЫЙ RATE LIMITER ====================
+
+class EnhancedRateLimiter:
+    def __init__(self):
+        self.requests = {}
+        self.lock = threading.Lock()
+    
+    def is_limited(self, user_id, action, max_requests):
+        with self.lock:
+            now = datetime.now()
+            hour_key = now.strftime("%Y%m%d%H")
+            
+            if user_id not in self.requests:
+                self.requests[user_id] = {}
+            
+            if action not in self.requests[user_id]:
+                self.requests[user_id][action] = {}
+            
+            if hour_key not in self.requests[user_id][action]:
+                self.requests[user_id][action][hour_key] = 0
+            
+            self.requests[user_id][action][hour_key] += 1
+            return self.requests[user_id][action][hour_key] > max_requests
+
+    def check_rate_limit(self, user_id: int, action: str = "default") -> Tuple[bool, str]:
+        """Проверяет лимиты и возвращает статус + сообщение"""
+        if self.is_limited(user_id, action, config.max_requests_per_hour):
+            return False, "🚫 Превышен лимит запросов. Попробуйте через час."
+        
+        if security_manager and security_manager.is_user_blocked(user_id):
+            return False, "🚫 Ваш аккаунт временно заблокирован."
+        
+        return True, ""
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БЕЗОПАСНОСТИ ====================
+
+def safe_get_ai_suggestion(problem_text: str, system_type: str) -> str:
+    """Безопасное получение AI рекомендации"""
+    try:
+        if 'ai_assistant' in globals() and ai_assistant:
+            return ai_assistant.suggest_solutions(problem_text, system_type)
+    except Exception as e:
+        logger.error(f"AI suggestion error: {e}")
+    return "Требуется диагностика специалистом"
+
+def safe_award_points(user_id: int, action: str):
+    """Безопасное начисление очков"""
+    try:
+        if 'gamification_engine' in globals() and gamification_engine:
+            gamification_engine.award_points(user_id, action)
+    except Exception as e:
+        logger.error(f"Gamification error: {e}")
+
+def safe_get_analytics(days: int = 30) -> Dict:
+    """Безопасное получение аналитики"""
+    try:
+        if 'analytics_engine' in globals() and analytics_engine:
+            return analytics_engine.get_advanced_analytics(days)
+    except Exception as e:
+        logger.error(f"Analytics error: {e}")
+    return {}
+
+def safe_get_system_metrics() -> Dict:
+    """Безопасное получение системных метрик"""
+    try:
+        if 'performance_monitor' in globals() and performance_monitor:
+            return performance_monitor.get_system_metrics()
+    except Exception as e:
+        logger.error(f"Metrics error: {e}")
+    return {}
+
 # ==================== СИСТЕМА ВЕБ-ПАНЕЛИ ====================
 
 class WebDashboard:
     def __init__(self, db_manager, port=5000):
-        if not FLASK_AVAILABLE:
+        self.db_manager = db_manager
+        self.port = port
+        self.is_available = FLASK_AVAILABLE
+        self.app = None
+        
+        if not self.is_available:
             logger.warning("⚠️ Flask не установлен - веб-панель отключена")
             return
             
-        self.app = Flask(__name__)
-        self.db_manager = db_manager
-        self.port = port
-        self.setup_routes()
+        try:
+            self.app = Flask(__name__)
+            self.setup_routes()
+        except Exception as e:
+            logger.error(f"Ошибка инициализации веб-панели: {e}")
+            self.is_available = False
     
     def setup_routes(self):
+        if not self.app:
+            return
+            
         @self.app.route('/')
         def dashboard():
-            stats = self.db_manager.get_statistics(7)
+            stats = self.db_manager.get_statistics(7) if self.db_manager else {'total': 0, 'completed': 0, 'new': 0, 'in_progress': 0}
             return f"""
             <html>
                 <head><title>Панель управления ботом</title></head>
@@ -129,15 +282,16 @@ class WebDashboard:
         def get_requests():
             status = request.args.get('status', 'all')
             requests = []
-            if status == 'all':
-                for status_type in ['new', 'in_progress', 'completed']:
-                    requests.extend(self.db_manager.get_requests_by_filter(status_type))
-            else:
-                requests = self.db_manager.get_requests_by_filter(status)
-            return jsonify({"requests": requests[:50]})  # Ограничиваем вывод
+            if self.db_manager:
+                if status == 'all':
+                    for status_type in ['new', 'in_progress', 'completed']:
+                        requests.extend(self.db_manager.get_requests_by_filter(status_type))
+                else:
+                    requests = self.db_manager.get_requests_by_filter(status)
+            return jsonify({"requests": requests[:50]})
     
     def run(self):
-        if not FLASK_AVAILABLE:
+        if not self.is_available or not self.app:
             return
             
         def run_flask():
@@ -157,7 +311,7 @@ class AnalyticsEngine:
         try:
             fig, ax = plt.subplots(figsize=(10, 6))
             
-            days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+            days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Ср', 'Вс']
             requests = stats_data.get('daily_requests', [0]*7)
             
             ax.bar(days, requests, color='skyblue')
@@ -171,6 +325,60 @@ class AnalyticsEngine:
             return base64.b64encode(buf.getvalue()).decode()
         except Exception as e:
             logger.error(f"Ошибка генерации графика: {e}")
+            return None
+
+    def generate_weekly_report(self) -> Optional[io.BytesIO]:
+        """Генерирует недельный отчет в виде изображения"""
+        try:
+            stats = db.get_statistics(7) if db else {}
+            analytics = safe_get_analytics(7)
+            
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
+            
+            # График 1: Статусы заявок
+            status_data = [stats.get('new', 0), stats.get('in_progress', 0), stats.get('completed', 0)]
+            status_labels = ['Новые', 'В работе', 'Выполнено']
+            ax1.pie(status_data, labels=status_labels, autopct='%1.1f%%')
+            ax1.set_title('Статусы заявок')
+            
+            # График 2: Распределение по системам
+            system_dist = analytics.get('system_distribution', {})
+            if system_dist:
+                ax2.bar(list(system_dist.keys()), list(system_dist.values()))
+                ax2.set_title('Распределение по системам')
+                ax2.tick_params(axis='x', rotation=45)
+            else:
+                ax2.text(0.5, 0.5, 'Нет данных', ha='center', va='center')
+                ax2.set_title('Распределение по системам')
+            
+            # График 3: Активность по дням
+            days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+            daily_data = [stats.get('total', 0) // 7] * 7  # Заглушка
+            ax3.plot(days, daily_data, marker='o')
+            ax3.set_title('Активность по дням')
+            ax3.grid(True)
+            
+            # График 4: Метрики производительности
+            metrics = safe_get_system_metrics()
+            metric_names = ['Память', 'CPU', 'Заявки']
+            metric_values = [
+                metrics.get('memory_usage', 0),
+                metrics.get('cpu_usage', 0),
+                min(metrics.get('requests_today', 0) / 10, 100)  # Нормализуем
+            ]
+            ax4.bar(metric_names, metric_values)
+            ax4.set_title('Системные метрики')
+            
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
+            plt.close()
+            return buf
+            
+        except Exception as e:
+            logger.error(f"Ошибка генерации отчета: {e}")
             return None
     
     def get_advanced_analytics(self, days=30):
@@ -252,6 +460,9 @@ class SmartNotificationManager:
     
     def send_reminder(self, request_id, reminder_type):
         """Отправляет напоминание о заявке"""
+        if not self.db_manager:
+            return
+            
         request = self.db_manager.get_request_by_id(request_id)
         if not request:
             return
@@ -271,6 +482,9 @@ class SmartNotificationManager:
     
     def check_pending_reminders(self):
         """Проверяет pending напоминания"""
+        if not self.db_manager:
+            return
+            
         try:
             stale_requests = self.db_manager.get_stuck_requests(24)
             for request in stale_requests:
@@ -401,18 +615,21 @@ class GamificationEngine:
         self.init_gamification()
     
     def init_gamification(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS user_points (
-                    user_id INTEGER PRIMARY KEY,
-                    points INTEGER DEFAULT 0,
-                    level INTEGER DEFAULT 1,
-                    achievements TEXT DEFAULT '[]',
-                    last_activity TEXT
-                )
-            ''')
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS user_points (
+                        user_id INTEGER PRIMARY KEY,
+                        points INTEGER DEFAULT 0,
+                        level INTEGER DEFAULT 1,
+                        achievements TEXT DEFAULT '[]',
+                        last_activity TEXT
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка инициализации геймификации: {e}")
     
     def award_points(self, user_id, action):
         """Начисляет очки за действие"""
@@ -425,38 +642,49 @@ class GamificationEngine:
         points_to_award = point_values.get(action, 0)
         
         if points_to_award > 0:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT OR REPLACE INTO user_points 
-                    (user_id, points, level, last_activity)
-                    VALUES (?, 
-                        COALESCE((SELECT points FROM user_points WHERE user_id = ?), 0) + ?,
-                        COALESCE((SELECT level FROM user_points WHERE user_id = ?), 1),
-                        ?
-                    )
-                ''', (user_id, user_id, points_to_award, user_id, datetime.now().isoformat()))
-                conn.commit()
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO user_points 
+                        (user_id, points, level, last_activity)
+                        VALUES (?, 
+                            COALESCE((SELECT points FROM user_points WHERE user_id = ?), 0) + ?,
+                            COALESCE((SELECT level FROM user_points WHERE user_id = ?), 1),
+                            ?
+                        )
+                    ''', (user_id, user_id, points_to_award, user_id, datetime.now().isoformat()))
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Ошибка начисления очков: {e}")
     
     def get_user_stats(self, user_id):
         """Возвращает статистику пользователя"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT points, level FROM user_points WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            return {'points': result[0] if result else 0, 'level': result[1] if result else 1}
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT points, level FROM user_points WHERE user_id = ?', (user_id,))
+                result = cursor.fetchone()
+                return {'points': result[0] if result else 0, 'level': result[1] if result else 1}
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики пользователя: {e}")
+            return {'points': 0, 'level': 1}
     
     def get_leaderboard(self, limit=10):
         """Возвращает таблицу лидеров"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT user_id, points, level 
-                FROM user_points 
-                ORDER BY points DESC 
-                LIMIT ?
-            ''', (limit,))
-            return cursor.fetchall()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT user_id, points, level 
+                    FROM user_points 
+                    ORDER BY points DESC 
+                    LIMIT ?
+                ''', (limit,))
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения таблицы лидеров: {e}")
+            return []
 
 # ==================== БАЗОВЫЕ КЛАССЫ ====================
 
@@ -477,8 +705,13 @@ class BackupManager:
     @staticmethod
     def create_backup():
         try:
+            if not os.path.exists(DB_PATH):
+                logger.error(f"Файл базы данных {DB_PATH} не существует")
+                return None
+                
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = os.path.join(BACKUP_DIR, f"backup_{timestamp}.db")
+            os.makedirs(BACKUP_DIR, exist_ok=True)
             shutil.copy2(DB_PATH, backup_path)
             logger.info(f"Бэкап создан: {backup_path}")
             return backup_path
@@ -486,27 +719,73 @@ class BackupManager:
             logger.error(f"Ошибка создания бэкапа: {e}")
             return None
 
-class RateLimiter:
+# ==================== КОНФИГУРАЦИЯ ====================
+
+class Config:
     def __init__(self):
-        self.requests = {}
-        self.lock = threading.Lock()
+        self.bot_token = BOT_TOKEN
+        self.admin_chat_ids = ADMIN_CHAT_IDS
+        self.max_requests_per_hour = MAX_REQUESTS_PER_HOUR
+        self.backup_retention_days = BACKUP_RETENTION_DAYS
+        self.auto_backup_hour = AUTO_BACKUP_HOUR
+        self.auto_backup_minute = AUTO_BACKUP_MINUTE
+        self.request_timeout_hours = REQUEST_TIMEOUT_HOURS
+        self.db_path = DB_PATH
+        self.backup_dir = BACKUP_DIR
+        self.sync_to_sheets = SYNC_TO_SHEETS
+        self.google_sheets_credentials = GOOGLE_SHEETS_CREDENTIALS
+        self.google_sheet_id = GOOGLE_SHEET_ID
+        self.google_sheet_name = GOOGLE_SHEET_NAME
+        self.openai_api_key = OPENAI_API_KEY
+        self.web_dashboard_port = WEB_DASHBOARD_PORT
     
-    def is_limited(self, user_id, action, max_requests):
-        with self.lock:
-            now = datetime.now()
-            hour_key = now.strftime("%Y%m%d%H")
+    def validate(self) -> bool:
+        if not self.bot_token:
+            logger.error("❌ BOT_TOKEN не установлен")
+            return False
+        if not self.admin_chat_ids:
+            logger.error("❌ ADMIN_CHAT_IDS не установлены")
+            return False
+        return True
+
+config = Config()
+
+# ==================== GOOGLE SHEETS ====================
+
+class GoogleSheetsManager:
+    def __init__(self, credentials_json: str, sheet_id: str, sheet_name: str = 'Заявки'):
+        self.credentials_json = credentials_json
+        self.sheet_id = sheet_id
+        self.sheet_name = sheet_name
+        self.client = None
+        self.sheet = None
+        self.is_connected = False
+        self._connect()
+    
+    def _connect(self):
+        try:
+            if not self.credentials_json or not self.sheet_id:
+                logger.warning("⚠️ Google Sheets не настроен")
+                return
             
-            if user_id not in self.requests:
-                self.requests[user_id] = {}
+            if not GOOGLE_SHEETS_AVAILABLE:
+                logger.warning("⚠️ Библиотеки Google Sheets не установлены")
+                return
             
-            if action not in self.requests[user_id]:
-                self.requests[user_id][action] = {}
+            creds_dict = json.loads(self.credentials_json)
+            SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
             
-            if hour_key not in self.requests[user_id][action]:
-                self.requests[user_id][action][hour_key] = 0
+            self.client = gspread.authorize(creds)
+            self.sheet = self.client.open_by_key(self.sheet_id).worksheet(self.sheet_name)
+            self.is_connected = True
+            logger.info("✅ Успешное подключение к Google Sheets")
             
-            self.requests[user_id][action][hour_key] += 1
-            return self.requests[user_id][action][hour_key] > max_requests
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+            self.is_connected = False
+
+# ==================== РАСШИРЕННАЯ БАЗА ДАННЫХ ====================
 
 class Database:
     def __init__(self, db_path):
@@ -514,41 +793,44 @@ class Database:
         self.init_db()
     
     def init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS requests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    name TEXT,
-                    phone TEXT,
-                    plot TEXT,
-                    system_type TEXT,
-                    problem TEXT,
-                    photo TEXT,
-                    urgency TEXT,
-                    status TEXT DEFAULT 'new',
-                    created_at TEXT,
-                    updated_at TEXT,
-                    assigned_to TEXT,
-                    completed_at TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
-                    request_count INTEGER DEFAULT 0,
-                    created_at TEXT,
-                    last_activity TEXT
-                )
-            ''')
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER,
+                        username TEXT,
+                        first_name TEXT,
+                        last_name TEXT,
+                        name TEXT,
+                        phone TEXT,
+                        plot TEXT,
+                        system_type TEXT,
+                        problem TEXT,
+                        photo TEXT,
+                        urgency TEXT,
+                        status TEXT DEFAULT 'new',
+                        created_at TEXT,
+                        updated_at TEXT,
+                        assigned_to TEXT,
+                        completed_at TEXT
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        last_name TEXT,
+                        request_count INTEGER DEFAULT 0,
+                        created_at TEXT,
+                        last_activity TEXT
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка инициализации базы данных: {e}")
     
     def save_request(self, data: Dict) -> int:
         try:
@@ -628,89 +910,23 @@ class Database:
             logger.error(f"Ошибка получения статистики: {e}")
             return {'total': 0, 'completed': 0, 'new': 0, 'in_progress': 0}
 
-# ==================== GOOGLE SHEETS ====================
-
-class GoogleSheetsManager:
-    def __init__(self, credentials_json: str, sheet_id: str, sheet_name: str = 'Заявки'):
-        self.credentials_json = credentials_json
-        self.sheet_id = sheet_id
-        self.sheet_name = sheet_name
-        self.client = None
-        self.sheet = None
-        self.is_connected = False
-        self._connect()
-    
-    def _connect(self):
-        try:
-            if not self.credentials_json or not self.sheet_id:
-                logger.warning("⚠️ Google Sheets не настроен")
-                return
-            
-            if not GOOGLE_SHEETS_AVAILABLE:
-                logger.warning("⚠️ Библиотеки Google Sheets не установлены")
-                return
-            
-            creds_dict = json.loads(self.credentials_json)
-            SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-            
-            self.client = gspread.authorize(creds)
-            self.sheet = self.client.open_by_key(self.sheet_id).worksheet(self.sheet_name)
-            self.is_connected = True
-            logger.info("✅ Успешное подключение к Google Sheets")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
-            self.is_connected = False
-
-# ==================== КОНФИГУРАЦИЯ ====================
-
-class Config:
-    def __init__(self):
-        self.bot_token = BOT_TOKEN
-        self.admin_chat_ids = ADMIN_CHAT_IDS
-        self.max_requests_per_hour = MAX_REQUESTS_PER_HOUR
-        self.backup_retention_days = BACKUP_RETENTION_DAYS
-        self.auto_backup_hour = AUTO_BACKUP_HOUR
-        self.auto_backup_minute = AUTO_BACKUP_MINUTE
-        self.request_timeout_hours = REQUEST_TIMEOUT_HOURS
-        self.db_path = DB_PATH
-        self.backup_dir = BACKUP_DIR
-        self.sync_to_sheets = SYNC_TO_SHEETS
-        self.google_sheets_credentials = GOOGLE_SHEETS_CREDENTIALS
-        self.google_sheet_id = GOOGLE_SHEET_ID
-        self.google_sheet_name = GOOGLE_SHEET_NAME
-        self.openai_api_key = OPENAI_API_KEY
-        self.web_dashboard_port = WEB_DASHBOARD_PORT
-    
-    def validate(self) -> bool:
-        if not self.bot_token:
-            logger.error("❌ BOT_TOKEN не установлен")
-            return False
-        if not self.admin_chat_ids:
-            logger.error("❌ ADMIN_CHAT_IDS не установлены")
-            return False
-        return True
-
-config = Config()
-
-# ==================== РАСШИРЕННАЯ БАЗА ДАННЫХ ====================
-
 class EnhancedDatabase(Database):
     def __init__(self, db_path, sheets_manager=None):
         super().__init__(db_path)
         self.sheets_manager = sheets_manager
+        self.ai_assistant = None
+        self.gamification_engine = None
     
     def save_request(self, data: Dict) -> int:
         request_id = super().save_request(data)
         
-        # AI анализ проблемы
-        if ai_assistant and data.get('problem'):
-            suggested_category = ai_assistant.analyze_problem_text(data['problem'])
+        # AI анализ проблемы (безопасно)
+        if data.get('problem'):
+            suggested_category = safe_get_ai_suggestion(data['problem'], data.get('system_type', ''))
             logger.info(f"🤖 AI определил категорию: {suggested_category}")
         
-        # Начисление очков
-        gamification_engine.award_points(data['user_id'], 'create_request')
+        # Начисление очков (безопасно)
+        safe_award_points(data['user_id'], 'create_request')
         
         # Синхронизация с Google Sheets
         if self.sheets_manager and self.sheets_manager.is_connected:
@@ -824,11 +1040,11 @@ class EnhancedDatabase(Database):
                 ''', values + [datetime.now().isoformat(), request_id])
                 conn.commit()
                 
-                # Начисляем очки за выполнение
+                # Начисляем очки за выполнение (безопасно)
                 if updates.get('status') == 'completed':
                     request_data = self.get_request_by_id(request_id)
                     if request_data:
-                        gamification_engine.award_points(request_data['user_id'], 'request_completed')
+                        safe_award_points(request_data['user_id'], 'request_completed')
                 
                 return True
         except sqlite3.Error as e:
@@ -839,49 +1055,67 @@ class EnhancedDatabase(Database):
 
 def initialize_all_systems():
     """Инициализирует все системы бота"""
-    global db
-    global sheets_manager
-    global notification_manager
-    global analytics_engine
-    global ai_assistant
-    global security_manager
-    global performance_monitor
-    global template_manager
-    global i18n
-    global gamification_engine
-    global web_dashboard
+    global db, sheets_manager, notification_manager, analytics_engine
+    global ai_assistant, security_manager, performance_monitor
+    global template_manager, i18n, gamification_engine, web_dashboard, rate_limiter
     
-    # Основные системы
-    if config.sync_to_sheets:
-        sheets_manager = GoogleSheetsManager(
-            config.google_sheets_credentials,
-            config.google_sheet_id,
-            config.google_sheet_name
-        )
-    else:
-        sheets_manager = None
-        logger.info("⚠️ Google Sheets отключен в конфигурации")
+    try:
+        # Сначала инициализируем основные компоненты
+        security_manager = SecurityManager()
+        performance_monitor = PerformanceMonitor()
+        template_manager = TemplateManager()
+        i18n = Internationalization()
+        rate_limiter = EnhancedRateLimiter()
+        
+        # Затем базу данных
+        if config.sync_to_sheets:
+            sheets_manager = GoogleSheetsManager(
+                config.google_sheets_credentials,
+                config.google_sheet_id,
+                config.google_sheet_name
+            )
+        else:
+            sheets_manager = None
+            logger.info("⚠️ Google Sheets отключен в конфигурации")
+        
+        db = EnhancedDatabase(DB_PATH, sheets_manager)
+        
+        # Теперь можем инициализировать зависимые системы
+        analytics_engine = AnalyticsEngine()
+        ai_assistant = AIAssistant(config.openai_api_key)
+        gamification_engine = GamificationEngine(DB_PATH)
+        
+        # Передаем зависимости в базу данных
+        db.ai_assistant = ai_assistant
+        db.gamification_engine = gamification_engine
+        
+        # Веб-панель
+        web_dashboard = WebDashboard(db, config.web_dashboard_port)
+        web_dashboard.run()
+        
+        logger.info("✅ Все системы инициализированы!")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации систем: {e}")
+        raise
+
+def quick_setup():
+    """Быстрая настройка для тестирования"""
+    global db, ai_assistant, gamification_engine, rate_limiter, security_manager, performance_monitor
     
-    db = EnhancedDatabase(DB_PATH, sheets_manager)
+    # Базовая инициализация даже если некоторые модули недоступны
+    db = EnhancedDatabase(DB_PATH)
+    ai_assistant = AIAssistant(config.openai_api_key) if config.openai_api_key else None
+    gamification_engine = GamificationEngine(DB_PATH)
+    rate_limiter = EnhancedRateLimiter()
     security_manager = SecurityManager()
     performance_monitor = PerformanceMonitor()
     
-    # Дополнительные системы
-    analytics_engine = AnalyticsEngine()
-    ai_assistant = AIAssistant(config.openai_api_key)
-    template_manager = TemplateManager()
-    i18n = Internationalization()
-    gamification_engine = GamificationEngine(DB_PATH)
-    
-    # Веб-панель
-    web_dashboard = WebDashboard(db, config.web_dashboard_port)
-    web_dashboard.run()
-    
-    logger.info("✅ Все системы инициализированы!")
+    logger.info("✅ Базовая инициализация завершена")
 
 # ==================== ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ====================
 
-rate_limiter = RateLimiter()
+rate_limiter = None
 db = None
 sheets_manager = None
 notification_manager = None
@@ -919,11 +1153,32 @@ def get_enhanced_admin_panel():
         ['🎮 Геймификация', '📊 Метрики']
     ]
 
+def create_request_actions_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Создает клавиатуру действий для заявки"""
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ В работу", callback_data=f"assign_{request_id}"),
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}")
+        ],
+        [
+            InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{request_id}"),
+            InlineKeyboardButton("✏️ Комментарий", callback_data=f"comment_{request_id}")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # ==================== ОСНОВНЫЕ ФУНКЦИИ БОТА ====================
 
+@safe_execute("Ошибка при отображении меню")
 def show_main_menu(update: Update, context: CallbackContext):
     """Показывает главное меню"""
     user = update.message.from_user
+    
+    # Проверка лимитов
+    allowed, message = rate_limiter.check_rate_limit(user.id, "main_menu")
+    if not allowed:
+        update.message.reply_text(message)
+        return
     
     if user.id in ADMIN_CHAT_IDS:
         reply_markup = ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True)
@@ -936,50 +1191,60 @@ def show_main_menu(update: Update, context: CallbackContext):
         parse_mode=ParseMode.MARKDOWN
     )
 
-def name(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает ввод имени"""
-    name_text = update.message.text
+@safe_execute("Ошибка при создании заявки")
+def enhanced_start_request_creation(update: Update, context: CallbackContext):
+    """Начало создания заявки"""
+    user = update.message.from_user
     
+    # Проверка лимитов
+    allowed, message = rate_limiter.check_rate_limit(user.id, "create_request")
+    if not allowed:
+        update.message.reply_text(message)
+        return ConversationHandler.END
+    
+    update.message.reply_text(
+        "📝 *Создание новой заявки*\n\nВведите ваше ФИО:",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return NAME
+
+@safe_execute("Ошибка при обработке имени")
+def name(update: Update, context: CallbackContext):
+    """Обработка имени"""
+    name_text = update.message.text
     if not Validators.validate_name(name_text):
-        update.message.reply_text(
-            "❌ Неверный формат имени. Используйте только буквы (2-50 символов).\nПопробуйте еще раз:"
-        )
+        update.message.reply_text("❌ Неверный формат имени. Используйте только буквы и пробелы.")
         return NAME
     
-    context.user_data['name'] = name_text
-    update.message.reply_text(
-        "📞 Теперь введите ваш номер телефона:",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    # Санитизация ввода
+    context.user_data['name'] = EnhancedValidators.sanitize_input(name_text)
+    update.message.reply_text("📞 Введите ваш номер телефона:")
     return PHONE
 
-def phone(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает ввод телефона"""
+@safe_execute("Ошибка при обработке телефона")
+def phone(update: Update, context: CallbackContext):
+    """Обработка телефона"""
     phone_text = update.message.text
-    
     if not Validators.validate_phone(phone_text):
-        update.message.reply_text(
-            "❌ Неверный формат телефона. Используйте цифры, пробелы, скобки и дефисы.\nПопробуйте еще раз:"
-        )
+        update.message.reply_text("❌ Неверный формат телефона. Пример: +7 123 456-78-90")
         return PHONE
     
     context.user_data['phone'] = phone_text
     
-    keyboard = [['🏠 Участок 1', '🏠 Участок 2'], ['🏠 Участок 3', '🏠 Другой']]
+    keyboard = [['Участок 1', 'Участок 2', 'Участок 3'], ['Другой участок']]
     update.message.reply_text(
         "📍 Выберите или введите номер участка:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return PLOT
 
-def plot(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает ввод участка"""
+@safe_execute("Ошибка при обработке участка")
+def plot(update: Update, context: CallbackContext):
+    """Обработка участка"""
     plot_text = update.message.text
-    
     if not Validators.validate_plot(plot_text):
-        update.message.reply_text(
-            "❌ Неверный формат участка. Используйте буквы, цифры и дефисы.\nПопробуйте еще раз:"
-        )
+        update.message.reply_text("❌ Неверный формат участка. Используйте только буквы, цифры и дефисы.")
         return PLOT
     
     context.user_data['plot'] = plot_text
@@ -987,7 +1252,7 @@ def plot(update: Update, context: CallbackContext) -> int:
     keyboard = [
         ['🔌 Электрика', '📶 Интернет'],
         ['📞 Телефония', '🎥 Видеонаблюдение'],
-        ['💧 Водоснабжение', '🔧 Другое']
+        ['🚿 Сантехника', '🔧 Обслуживание']
     ]
     update.message.reply_text(
         "⚙️ Выберите тип системы:",
@@ -995,83 +1260,82 @@ def plot(update: Update, context: CallbackContext) -> int:
     )
     return SYSTEM_TYPE
 
-def system_type(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает выбор типа системы"""
+@safe_execute("Ошибка при обработке типа системы")
+def system_type(update: Update, context: CallbackContext):
+    """Обработка типа системы"""
     context.user_data['system_type'] = update.message.text
+    
     update.message.reply_text(
-        "📝 Опишите проблему подробно:\n\n_Пример: Не работает интернет в гостиной, индикаторы на роутере не горят_",
+        "📝 Опишите проблему подробно:\n\n*Пример:* Не работает розетка в комнате 101, нет напряжения",
         reply_markup=ReplyKeyboardRemove(),
         parse_mode=ParseMode.MARKDOWN
     )
     return PROBLEM
 
-def problem(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает описание проблемы"""
-    context.user_data['problem'] = update.message.text
+@safe_execute("Ошибка при обработке проблемы")
+def problem(update: Update, context: CallbackContext):
+    """Обработка описания проблемы"""
+    problem_text = update.message.text
     
-    keyboard = [
-        ['🔴 Срочно (в течение 1 часа)', '🟡 Средняя срочность (2-4 часа)'],
-        ['🟢 Не срочно (в течение дня)', '⏰ Запланировать на завтра']
-    ]
+    # Валидация текста проблемы
+    is_valid, error_message = EnhancedValidators.validate_problem_text(problem_text)
+    if not is_valid:
+        update.message.reply_text(f"❌ {error_message}")
+        return PROBLEM
+    
+    # Санитизация ввода
+    context.user_data['problem'] = EnhancedValidators.sanitize_input(problem_text)
+    
+    keyboard = [['🔴 Срочно', '🟡 Средняя', '🟢 Не срочно']]
     update.message.reply_text(
         "⏱️ Выберите срочность заявки:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return URGENCY
 
-def urgency(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает выбор срочности"""
+@safe_execute("Ошибка при обработке срочности")
+def urgency(update: Update, context: CallbackContext):
+    """Обработка срочности"""
     context.user_data['urgency'] = update.message.text
+    context.user_data['user_id'] = update.message.from_user.id
+    context.user_data['username'] = update.message.from_user.username
+    context.user_data['first_name'] = update.message.from_user.first_name
+    context.user_data['last_name'] = update.message.from_user.last_name
     
-    keyboard = [['📷 Прикрепить фото', '🚀 Пропустить']]
-    update.message.reply_text(
-        "📷 Хотите прикрепить фото проблемы?",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return PHOTO
-
-def photo(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает фото или пропуск"""
-    if update.message.text == '🚀 Пропустить':
-        context.user_data['photo'] = None
-        return show_request_summary(update, context)
-    elif update.message.photo:
-        # Сохраняем информацию о фото
-        photo_file = update.message.photo[-1].get_file()
-        context.user_data['photo'] = photo_file.file_id
-        return show_request_summary(update, context)
-    else:
-        update.message.reply_text(
-            "📷 Пожалуйста, прикрепите фото или нажмите 'Пропустить'"
-        )
-        return PHOTO
-
-def show_request_summary(update: Update, context: CallbackContext) -> int:
-    """Показывает сводку заявки для подтверждения"""
-    user_data = context.user_data
-    
-    summary_text = (
-        "📋 *Сводка заявки*\n\n"
-        f"👤 *Имя:* {user_data.get('name', 'Не указано')}\n"
-        f"📞 *Телефон:* {user_data.get('phone', 'Не указан')}\n"
-        f"📍 *Участок:* {user_data.get('plot', 'Не указан')}\n"
-        f"⚙️ *Тип системы:* {user_data.get('system_type', 'Не указан')}\n"
-        f"📝 *Проблема:* {user_data.get('problem', 'Не указана')}\n"
-        f"⏱️ *Срочность:* {user_data.get('urgency', 'Не указана')}\n"
-        f"📷 *Фото:* {'✅ Прикреплено' if user_data.get('photo') else '❌ Отсутствует'}\n\n"
-        "_Всё верно?_"
+    # Показываем подтверждение
+    request_text = (
+        "📋 *Проверьте данные заявки:*\n\n"
+        f"👤 *ФИО:* {context.user_data['name']}\n"
+        f"📞 *Телефон:* {context.user_data['phone']}\n"
+        f"📍 *Участок:* {context.user_data['plot']}\n"
+        f"⚙️ *Система:* {context.user_data['system_type']}\n"
+        f"📝 *Проблема:* {context.user_data['problem']}\n"
+        f"⏱️ *Срочность:* {context.user_data['urgency']}\n\n"
+        "Всё верно?"
     )
     
     keyboard = [['✅ Подтвердить отправку', '❌ Отменить']]
     update.message.reply_text(
-        summary_text,
+        request_text,
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
     return ConversationHandler.END
 
-def cancel_request(update: Update, context: CallbackContext) -> int:
-    """Отменяет создание заявки"""
+def photo(update: Update, context: CallbackContext):
+    """Обработка фото (если добавлено)"""
+    if update.message.photo:
+        # Сохраняем информацию о фото
+        photo_file = update.message.photo[-1].get_file()
+        context.user_data['photo'] = photo_file.file_id
+        update.message.reply_text("✅ Фото добавлено к заявке")
+    else:
+        context.user_data['photo'] = None
+    
+    return URGENCY
+
+def cancel_request(update: Update, context: CallbackContext):
+    """Отмена создания заявки"""
     context.user_data.clear()
     update.message.reply_text(
         "❌ Создание заявки отменено.",
@@ -1079,6 +1343,7 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
     )
     return ConversationHandler.END
 
+@safe_execute("Ошибка при подтверждении заявки")
 def enhanced_confirm_request(update: Update, context: CallbackContext) -> None:
     """Подтверждение заявки с AI-рекомендациями"""
     if update.message.text == '✅ Подтвердить отправку':
@@ -1094,14 +1359,10 @@ def enhanced_confirm_request(update: Update, context: CallbackContext) -> None:
                     )
                     return
             
-            # AI анализ проблемы
+            # AI анализ проблемы (безопасно)
             problem_text = context.user_data['problem']
-            if ai_assistant:
-                suggested_solution = ai_assistant.suggest_solutions(
-                    problem_text, 
-                    context.user_data['system_type']
-                )
-                context.user_data['ai_suggestion'] = suggested_solution
+            suggested_solution = safe_get_ai_suggestion(problem_text, context.user_data['system_type'])
+            context.user_data['ai_suggestion'] = suggested_solution
             
             request_id = db.save_request(context.user_data)
             performance_monitor.increment_request_count()
@@ -1171,74 +1432,120 @@ def enhanced_confirm_request(update: Update, context: CallbackContext) -> None:
             reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
         )
 
-def show_enhanced_admin_panel(update: Update, context: CallbackContext):
-    """Показывает админ-панель"""
-    user = update.message.from_user
-    if user.id not in ADMIN_CHAT_IDS:
-        update.message.reply_text("❌ У вас нет доступа к этой команде.")
+@safe_execute("Ошибка при обработке меню")
+def enhanced_handle_main_menu(update: Update, context: CallbackContext):
+    """Обработка основного меню пользователя"""
+    user_id = update.message.from_user.id
+    text = update.message.text
+    
+    # Проверка лимитов
+    allowed, message = rate_limiter.check_rate_limit(user_id, "main_menu")
+    if not allowed:
+        update.message.reply_text(message)
         return
     
-    update.message.reply_text(
-        "👑 *Панель администратора*\n\nВыберите действие:",
-        reply_markup=ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-def show_statistics(update: Update, context: CallbackContext):
-    """Показывает статистику"""
-    stats = db.get_statistics(7) if db else {'total': 0, 'completed': 0, 'new': 0, 'in_progress': 0}
+    if text == '📋 Мои заявки':
+        # Логика показа заявок пользователя
+        update.message.reply_text("📋 Функция 'Мои заявки' в разработке")
     
-    text = (
-        "📊 *Статистика за 7 дней*\n\n"
-        f"📨 Всего заявок: {stats['total']}\n"
-        f"✅ Выполнено: {stats['completed']}\n"
-        f"🆕 Новых: {stats['new']}\n"
-        f"🔄 В работе: {stats['in_progress']}"
-    )
+    elif text == '📊 Моя статистика':
+        user_stats = db.get_user_statistics(user_id) if db else {}
+        stats_text = (
+            "📊 *Ваша статистика*\n\n"
+            f"📨 Всего заявок: {user_stats.get('total_requests', 0)}\n"
+            f"✅ Выполнено: {user_stats.get('completed', 0)}\n"
+            f"🔄 В работе: {user_stats.get('in_progress', 0)}\n"
+            f"🆕 Новых: {user_stats.get('new', 0)}\n"
+        )
+        update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
     
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    elif text == '🎮 Игровая статистика':
+        show_gamification_stats(update, context)
+    
+    elif text == '📈 Аналитика':
+        show_advanced_analytics(update, context)
 
-# ==================== НОВЫЕ КОМАНДЫ И ФУНКЦИИ ====================
+@safe_execute("Ошибка при обработке админ-меню")
+def enhanced_handle_admin_menu(update: Update, context: CallbackContext):
+    """Обработка админ-меню"""
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_CHAT_IDS:
+        update.message.reply_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    text = update.message.text
+    
+    if text.startswith('🆕 Новые'):
+        new_requests = db.get_requests_by_filter('new') if db else []
+        if not new_requests:
+            update.message.reply_text("✅ Новых заявок нет")
+        else:
+            for request in new_requests[:5]:  # Показываем первые 5
+                request_text = (
+                    f"🆕 *Заявка #{request['id']}*\n\n"
+                    f"👤 {request['name']}\n"
+                    f"📞 {request['phone']}\n"
+                    f"📍 {request['plot']}\n"
+                    f"📝 {request['problem'][:100]}...\n"
+                )
+                update.message.reply_text(
+                    request_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=create_request_actions_keyboard(request['id'])
+                )
+    
+    elif text == '📊 Метрики':
+        show_system_metrics(update, context)
+    
+    elif text == '📈 Аналитика':
+        show_advanced_analytics(update, context)
+    
+    elif text == '🎮 Геймификация':
+        show_gamification_stats(update, context)
 
-def create_request_actions_keyboard(request_id):
-    """Создает интерактивные кнопки для заявки"""
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Выполнено", callback_data=f"complete_{request_id}"),
-            InlineKeyboardButton("🔄 В работу", callback_data=f"progress_{request_id}"),
-        ],
-        [
-            InlineKeyboardButton("📞 Позвонить", callback_data=f"call_{request_id}"),
-            InlineKeyboardButton("📊 Статистика", callback_data=f"stats_{request_id}"),
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
+@safe_execute("Ошибка при обработке кнопок")
 def button_handler(update: Update, context: CallbackContext):
-    """Обработчик inline-кнопок"""
+    """Обработчик inline кнопок"""
     query = update.callback_query
     query.answer()
     
     data = query.data
-    request_id = data.split('_')[1] if '_' in data else None
-    
-    if data.startswith('complete_') and request_id:
-        success = db.update_request(request_id, {'status': 'completed', 'completed_at': datetime.now().isoformat()})
-        if success:
-            query.edit_message_text(f"✅ Заявка #{request_id} выполнена!")
+    if data.startswith('assign_'):
+        request_id = int(data.split('_')[1])
+        if db and db.update_request(request_id, {'status': 'in_progress'}):
+            query.edit_message_text(f"✅ Заявка #{request_id} взята в работу")
         else:
             query.edit_message_text(f"❌ Ошибка обновления заявки #{request_id}")
     
-    elif data.startswith('progress_') and request_id:
-        success = db.update_request(request_id, {'status': 'in_progress'})
-        if success:
-            query.edit_message_text(f"🔄 Заявка #{request_id} взята в работу!")
+    elif data.startswith('complete_'):
+        request_id = int(data.split('_')[1])
+        if db and db.update_request(request_id, {'status': 'completed', 'completed_at': datetime.now().isoformat()}):
+            query.edit_message_text(f"✅ Заявка #{request_id} выполнена")
+            
+            # Уведомляем пользователя
+            try:
+                request_data = db.get_request_by_id(request_id)
+                if request_data:
+                    context.bot.send_message(
+                        chat_id=request_data['user_id'],
+                        text=f"✅ Ваша заявка #{request_id} выполнена! Спасибо за обращение!"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления пользователя: {e}")
         else:
-            query.edit_message_text(f"❌ Ошибка обновления заявки #{request_id}")
+            query.edit_message_text(f"❌ Ошибка завершения заявки #{request_id}")
+
+def handle_voice_message(update: Update, context: CallbackContext):
+    """Обработка голосовых сообщений"""
+    update.message.reply_text(
+        "🎤 Голосовые сообщения пока не поддерживаются. "
+        "Пожалуйста, опишите проблему текстом.",
+        reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
+    )
 
 def show_advanced_analytics(update: Update, context: CallbackContext):
     """Показывает расширенную аналитику"""
-    analytics = analytics_engine.get_advanced_analytics(30) if analytics_engine else {}
+    analytics = safe_get_analytics(30)
     
     text = "📈 *Расширенная аналитика*\n\n"
     text += f"⏱️ *Среднее время выполнения:* {analytics.get('avg_completion_hours', 0)}ч\n\n"
@@ -1247,11 +1554,20 @@ def show_advanced_analytics(update: Update, context: CallbackContext):
     for system, count in analytics.get('system_distribution', {}).items():
         text += f"• {system}: {count} заявок\n"
     
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    # Генерация и отправка графика
+    report_image = analytics_engine.generate_weekly_report() if analytics_engine else None
+    if report_image:
+        update.message.reply_photo(
+            photo=InputFile(report_image, filename='report.png'),
+            caption=text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 def show_system_metrics(update: Update, context: CallbackContext):
     """Показывает системные метрики"""
-    metrics = performance_monitor.get_system_metrics() if performance_monitor else {}
+    metrics = safe_get_system_metrics()
     
     text = "📊 *Системные метрики*\n\n"
     text += f"⏱️ Аптайм: {metrics.get('uptime', 0):.0f} сек\n"
@@ -1280,248 +1596,31 @@ def show_gamification_stats(update: Update, context: CallbackContext):
     
     update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-def handle_voice_message(update: Update, context: CallbackContext):
-    """Обрабатывает голосовые сообщения"""
-    if update.message.voice:
-        update.message.reply_text(
-            "🎤 Голосовые сообщения пока не поддерживаются. "
-            "Пожалуйста, опишите проблему текстом.",
-            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
-        )
-
-def secure_handler(handler_func):
-    """Декоратор для безопасной обработки"""
-    def wrapper(update: Update, context: CallbackContext):
-        user_id = update.message.from_user.id
-        
-        if security_manager and security_manager.is_user_blocked(user_id):
-            update.message.reply_text("❌ Ваш аккаунт временно заблокирован")
-            return
-        
-        if security_manager and not security_manager.check_suspicious_activity(user_id, 'message'):
-            update.message.reply_text("❌ Слишком много запросов")
-            return
-        
-        return handler_func(update, context)
-    return wrapper
-
-@secure_handler
-def enhanced_start_request_creation(update: Update, context: CallbackContext) -> int:
-    """Начало создания заявки с AI-анализом"""
+def show_enhanced_admin_panel(update: Update, context: CallbackContext):
+    """Показывает улучшенную админ-панель"""
     user_id = update.message.from_user.id
-    
-    if rate_limiter.is_limited(user_id, 'create_request', MAX_REQUESTS_PER_HOUR):
-        update.message.reply_text(
-            "❌ *Превышен лимит запросов!*\n\nВы можете создавать не более 15 заявок в час.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ReplyKeyboardMarkup(enhanced_user_main_menu_keyboard, resize_keyboard=True)
-        )
-        return ConversationHandler.END
-    
-    context.user_data.clear()
-    user = update.message.from_user
-    context.user_data.update({
-        'user_id': user.id,
-        'username': user.username,
-        'first_name': user.first_name,
-        'last_name': user.last_name
-    })
-    
-    update.message.reply_text(
-        "📝 *Создание новой заявки*\n\nДля начала укажите ваше имя:",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return NAME
-
-def enhanced_handle_main_menu(update: Update, context: CallbackContext):
-    """Обрабатывает основные команды меню"""
-    text = update.message.text
-    
-    if text == '📋 Мои заявки':
-        update.message.reply_text("📋 Функция 'Мои заявки' в разработке...")
-    elif text == '📊 Моя статистика':
-        show_user_statistics(update, context)
-    elif text == '🆘 Срочная помощь':
-        update.message.reply_text("🆘 Для срочной помощи звоните: +7 (XXX) XXX-XX-XX")
-    elif text == '🎮 Игровая статистика':
-        show_gamification_stats(update, context)
-    elif text == '📈 Аналитика':
-        show_advanced_analytics(update, context)
-    elif text == 'ℹ️ О боте':
-        update.message.reply_text("ℹ️ Это бот для управления заявками технической поддержки.")
-    elif text == '⚙️ Настройки':
-        update.message.reply_text("⚙️ Настройки в разработке...")
-
-def enhanced_handle_admin_menu(update: Update, context: CallbackContext):
-    """Обрабатывает команды админ-меню"""
-    user = update.message.from_user
-    if user.id not in ADMIN_CHAT_IDS:
+    if user_id not in ADMIN_CHAT_IDS:
         update.message.reply_text("❌ У вас нет доступа к этой команде.")
         return
     
-    text = update.message.text
-    
-    if text.startswith('🆕 Новые'):
-        show_requests_by_status(update, context, 'new')
-    elif text.startswith('🔄 В работе'):
-        show_requests_by_status(update, context, 'in_progress')
-    elif text.startswith('⏰ Срочные'):
-        show_urgent_requests(update, context)
-    elif text.startswith('🚨 Зависшие'):
-        show_stuck_requests(update, context)
-    elif text == '📊 Статистика':
-        show_statistics(update, context)
-    elif text == '📈 Аналитика':
-        show_advanced_analytics(update, context)
-    elif text == '👥 Пользователи':
-        show_users_statistics(update, context)
-    elif text == '⚙️ Настройки':
-        update.message.reply_text("⚙️ Настройки админ-панели в разработке...")
-    elif text == '💾 Бэкапы':
-        create_backup_command(update, context)
-    elif text == '🔄 Обновить':
-        show_enhanced_admin_panel(update, context)
-    elif text == '📊 Google Sheets':
-        show_google_sheets_status(update, context)
-    elif text == '🔄 Синхронизация':
-        sync_with_sheets(update, context)
-    elif text == '🎮 Геймификация':
-        show_gamification_leaderboard(update, context)
-    elif text == '📊 Метрики':
-        show_system_metrics(update, context)
+    reply_markup = ReplyKeyboardMarkup(get_enhanced_admin_panel(), resize_keyboard=True)
+    update.message.reply_text(
+        "👑 *Панель администратора*\n\nВыберите действие:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-def show_requests_by_status(update: Update, context: CallbackContext, status: str):
-    """Показывает заявки по статусу"""
-    requests = db.get_requests_by_filter(status) if db else []
+def show_statistics(update: Update, context: CallbackContext):
+    """Показывает статистику"""
+    stats = db.get_statistics(7) if db else {}
     
-    if not requests:
-        update.message.reply_text(f"📭 Нет заявок со статусом '{status}'")
-        return
-    
-    text = f"📋 *Заявки ({status})*:\n\n"
-    for req in requests[:10]:  # Ограничиваем вывод
-        text += f"#{req['id']} - {req['name']} - {req['plot']}\n"
-        text += f"Проблема: {req['problem'][:50]}...\n"
-        text += f"Создана: {req['created_at'][:16]}\n\n"
-    
-    if len(requests) > 10:
-        text += f"... и еще {len(requests) - 10} заявок"
-    
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def show_urgent_requests(update: Update, context: CallbackContext):
-    """Показывает срочные заявки"""
-    requests = db.get_urgent_requests() if db else []
-    
-    if not requests:
-        update.message.reply_text("✅ Нет срочных заявок, требующих внимания")
-        return
-    
-    text = "🔴 *Срочные заявки:*\n\n"
-    for req in requests:
-        text += f"#{req['id']} - {req['name']} - {req['plot']}\n"
-        text += f"Проблема: {req['problem'][:50]}...\n"
-        text += f"Создана: {req['created_at'][:16]}\n\n"
-    
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def show_stuck_requests(update: Update, context: CallbackContext):
-    """Показывает зависшие заявки"""
-    requests = db.get_stuck_requests(24) if db else []
-    
-    if not requests:
-        update.message.reply_text("✅ Нет зависших заявок")
-        return
-    
-    text = "🚨 *Зависшие заявки (>24 часов):*\n\n"
-    for req in requests:
-        text += f"#{req['id']} - {req['name']} - {req['plot']}\n"
-        text += f"Статус: {req['status']}\n"
-        text += f"Создана: {req['created_at'][:16]}\n\n"
-    
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def show_user_statistics(update: Update, context: CallbackContext):
-    """Показывает статистику пользователя"""
-    user_id = update.message.from_user.id
-    stats = db.get_user_statistics(user_id) if db else {}
-    
-    text = "📊 *Ваша статистика:*\n\n"
-    text += f"📨 Всего заявок: {stats.get('total_requests', 0)}\n"
-    text += f"✅ Выполнено: {stats.get('completed', 0)}\n"
-    text += f"🔄 В работе: {stats.get('in_progress', 0)}\n"
-    text += f"🆕 Новых: {stats.get('new', 0)}\n"
-    
-    if stats.get('first_request'):
-        text += f"📅 Первая заявка: {stats['first_request'][:10]}\n"
-    if stats.get('last_request'):
-        text += f"📅 Последняя заявка: {stats['last_request'][:10]}\n"
-    
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def show_users_statistics(update: Update, context: CallbackContext):
-    """Показывает статистику пользователей (админ)"""
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT COUNT(*) as total_users, 
-                       SUM(request_count) as total_requests,
-                       AVG(request_count) as avg_requests
-                FROM users
-            ''')
-            result = cursor.fetchone()
-            
-            text = "👥 *Статистика пользователей:*\n\n"
-            text += f"👤 Всего пользователей: {result[0]}\n"
-            text += f"📨 Всего заявок: {result[1]}\n"
-            text += f"📊 Среднее заявок на пользователя: {result[2]:.1f}\n"
-            
-            update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики пользователей: {e}")
-        update.message.reply_text("❌ Ошибка получения статистики")
-
-def create_backup_command(update: Update, context: CallbackContext):
-    """Создает бэкап базы данных"""
-    backup_path = BackupManager.create_backup()
-    if backup_path:
-        update.message.reply_text(f"✅ Бэкап создан: `{backup_path}`", parse_mode=ParseMode.MARKDOWN)
-    else:
-        update.message.reply_text("❌ Ошибка создания бэкапа")
-
-def show_google_sheets_status(update: Update, context: CallbackContext):
-    """Показывает статус Google Sheets"""
-    if sheets_manager and sheets_manager.is_connected:
-        update.message.reply_text("✅ Google Sheets подключен и работает")
-    else:
-        update.message.reply_text("❌ Google Sheets не подключен")
-
-def sync_with_sheets(update: Update, context: CallbackContext):
-    """Синхронизирует данные с Google Sheets"""
-    if sheets_manager and sheets_manager.is_connected:
-        update.message.reply_text("🔄 Синхронизация с Google Sheets...")
-        # Здесь можно добавить логику синхронизации
-        update.message.reply_text("✅ Синхронизация завершена")
-    else:
-        update.message.reply_text("❌ Google Sheets не подключен")
-
-def show_gamification_leaderboard(update: Update, context: CallbackContext):
-    """Показывает таблицу лидеров геймификации"""
-    if not gamification_engine:
-        update.message.reply_text("❌ Система геймификации не активирована")
-        return
-    
-    leaderboard = gamification_engine.get_leaderboard(10)
-    
-    if not leaderboard:
-        update.message.reply_text("🏆 Таблица лидеров пуста")
-        return
-    
-    text = "🏅 *Таблица лидеров:*\n\n"
-    for i, (user_id, points, level) in enumerate(leaderboard, 1):
-        text += f"{i}. Уровень {level} - {points} очков (ID: {user_id})\n"
+    text = (
+        "📊 *Статистика за 7 дней*\n\n"
+        f"📨 Всего заявок: {stats.get('total', 0)}\n"
+        f"✅ Выполнено: {stats.get('completed', 0)}\n"
+        f"🔄 В работе: {stats.get('in_progress', 0)}\n"
+        f"🆕 Новых: {stats.get('new', 0)}\n"
+    )
     
     update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -1595,7 +1694,12 @@ def enhanced_main() -> None:
     try:
         # Инициализация всех систем
         initialize_all_systems()
-        
+    except Exception as e:
+        logger.error(f"❌ Полная инициализация не удалась: {e}")
+        logger.info("🔄 Попытка базовой инициализации...")
+        quick_setup()
+    
+    try:
         updater = Updater(BOT_TOKEN)
         dispatcher = updater.dispatcher
 
@@ -1610,8 +1714,7 @@ def enhanced_main() -> None:
         if job_queue:
             try:
                 # Ежедневное резервное копирование
-                from datetime import time as dt_time
-                backup_time = dt_time(hour=AUTO_BACKUP_HOUR, minute=AUTO_BACKUP_MINUTE)
+                backup_time = time(hour=AUTO_BACKUP_HOUR, minute=AUTO_BACKUP_MINUTE)
                 job_queue.run_daily(backup_job, time=backup_time)
                 
                 # Ежечасная проверка срочных заявок
@@ -1691,7 +1794,7 @@ def enhanced_main() -> None:
         logger.info(f"👑 Администраторы: {len(ADMIN_CHAT_IDS)}")
         logger.info(f"📊 Google Sheets: {'✅ Подключен' if sheets_manager and sheets_manager.is_connected else '❌ Отключен'}")
         logger.info(f"🤖 AI помощник: {'✅ Активен' if ai_assistant else '❌ Отключен'}")
-        logger.info(f"🌐 Веб-панель: {'✅ Запущена' if FLASK_AVAILABLE else '❌ Отключена'}")
+        logger.info(f"🌐 Веб-панель: {'✅ Запущена' if web_dashboard and web_dashboard.is_available else '❌ Отключена'}")
         
         updater.start_polling()
         updater.idle()
