@@ -73,19 +73,19 @@ class Validators:
 
 # ==================== УЛУЧШЕННЫЕ КЛАВИАТУРЫ ====================
 
-# 🎨 Главное меню пользователя - улучшенный дизайн
+# 🎯 Главное меню пользователя
 user_main_menu_keyboard = [
     ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['✏️ Редактировать заявку', 'ℹ️ Помощь']
+    ['✏️ Редактировать заявку', '📞 Контакты IT']
 ]
 
 # 👑 Главное меню администратора
 admin_main_menu_keyboard = [
-    ['👑 Админ-панель', '📊 Статистика'],
+    ['👑 Админ-панель'],
     ['🎯 Создать заявку', '📂 Мои заявки']
 ]
 
-# 💻 Типы IT систем - обновленные категории
+# 💻 Типы IT систем
 create_request_keyboard = [
     ['💻 Компьютеры', '🖨️ Принтеры'],
     ['🌐 Интернет', '📞 Телефония'],
@@ -106,7 +106,7 @@ photo_keyboard = [
     ['🔙 Назад']
 ]
 
-# ⏰ Клавиатура срочности - улучшенный дизайн
+# ⏰ Клавиатура срочности
 urgency_keyboard = [
     ['🔥 СРОЧНО (1-2 часа)'],
     ['⚠️ СЕГОДНЯ (до конца дня)'],
@@ -114,7 +114,7 @@ urgency_keyboard = [
     ['🔙 Назад']
 ]
 
-# 🏢 Типы участков - обновленные для IT
+# 🏢 Типы участков
 plot_type_keyboard = [
     ['🏢 Центральный офис', '🏭 Производство'],
     ['📦 Складской комплекс', '🛒 Торговый зал'],
@@ -133,11 +133,10 @@ edit_choice_keyboard = [
 # ◀️ Клавиатура назад
 edit_field_keyboard = [['◀️ Назад к редактированию']]
 
-# 👑 Панель администратора
+# 👑 Панель администратора (убран "Главное меню")
 admin_panel_keyboard = [
     ['🆕 Новые заявки', '🔄 В работе'],
-    ['✅ Выполненные', '📊 Статистика'],
-    ['🔙 Главное меню']
+    ['✅ Выполненные заявки', '📊 Статистика']
 ]
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -273,7 +272,7 @@ class Database:
                 elif filter_type == 'in_progress':
                     status_filter = "status = 'in_progress'"
                 elif filter_type == 'completed':
-                    status_filter = "status = 'completed'"
+                    status_filter = "status = 'completed'"  # ✅ Исправлено
                 else:
                     status_filter = "status IN ('new', 'in_progress')"
                 
@@ -786,9 +785,14 @@ def cancel_request(update: Update, context: CallbackContext) -> int:
 # ==================== РЕДАКТИРОВАНИЕ ЗАЯВОК ====================
 
 def start_edit_request(update: Update, context: CallbackContext) -> int:
-    """Начинает процесс редактирования заявки"""
+    """Начинает процесс редактирования заявки - ИСПРАВЛЕНА"""
     user_id = update.message.from_user.id
     logger.info(f"Пользователь {user_id} начал редактирование заявки")
+    
+    # Очищаем предыдущие данные редактирования
+    context.user_data.pop('editing_request_id', None)
+    context.user_data.pop('editing_request_data', None)
+    context.user_data.pop('editing_existing', None)
     
     requests = db.get_user_requests(user_id, 20)
     
@@ -832,7 +836,7 @@ def start_edit_request(update: Update, context: CallbackContext) -> int:
     return SELECT_REQUEST
 
 def select_request_for_edit(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает выбор заявки для редактирования"""
+    """Обрабатывает выбор заявки для редактирования - ИСПРАВЛЕНА"""
     text = update.message.text
     
     if text == '🔙 Главное меню':
@@ -1563,12 +1567,10 @@ def handle_admin_menu(update: Update, context: CallbackContext) -> None:
         return show_requests_by_filter(update, context, 'new')
     elif text == '🔄 В работе':
         return show_requests_by_filter(update, context, 'in_progress')
-    elif text == '✅ Выполненные заявки':
+    elif text == '✅ Выполненные заявки':  # ✅ Исправлено название кнопки
         return show_requests_by_filter(update, context, 'completed')
     elif text == '📊 Статистика':
         return show_statistics(update, context)
-    elif text == '🔙 Главное меню':
-        return show_main_menu(update, context)
 
 def show_statistics(update: Update, context: CallbackContext) -> None:
     """Показывает статистику"""
@@ -1740,6 +1742,37 @@ def show_my_requests(update: Update, context: CallbackContext) -> None:
         parse_mode=ParseMode.MARKDOWN
     )
 
+def show_contacts(update: Update, context: CallbackContext) -> None:
+    """Показывает контакты IT отдела"""
+    contacts_text = (
+        "📞 *Контакты IT отдела*\n\n"
+        "👔 *Руководитель отдела:*\n"
+        "• Комаров Денис\n"
+        "• 📱 +7 911 426 18 66\n\n"
+        "💻 *Системный администратор:*\n"
+        "• Михаил\n"
+        "• 📱 +7 995 830 37 92\n\n"
+        "🕒 *Время работы:*\n"
+        "• Пн-Пт: 9:00 - 18:00\n"
+        "• Сб: 10:00 - 15:00\n"
+        "• Вс: выходной\n\n"
+        "📍 *Расположение:*\n"
+        "• Кабинет IT отдела: 3 этаж\n"
+        "• Техническая поддержка: 3 этаж\n\n"
+        "💬 *Экстренная связь:*\n"
+        "• По телефону в рабочее время\n"
+        "• Через бот в любое время"
+    )
+    
+    user_id = update.message.from_user.id
+    keyboard = admin_main_menu_keyboard if user_id in Config.ADMIN_CHAT_IDS else user_main_menu_keyboard
+    
+    update.message.reply_text(
+        contacts_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 def handle_main_menu(update: Update, context: CallbackContext) -> None:
     """Обрабатывает выбор в главном меню"""
     text = update.message.text
@@ -1748,8 +1781,6 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
     if user_id in Config.ADMIN_CHAT_IDS:
         if text == '👑 Админ-панель':
             return show_admin_panel(update, context)
-        elif text == '📊 Статистика':
-            return show_statistics(update, context)
         elif text == '🎯 Создать заявку':
             return start_request_creation(update, context)
         elif text == '📂 Мои заявки':
@@ -1761,8 +1792,8 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
             return show_my_requests(update, context)
         elif text == '✏️ Редактировать заявку':
             return start_edit_request(update, context)
-        elif text == 'ℹ️ Помощь':
-            return show_help(update, context)
+        elif text == '📞 Контакты IT':
+            return show_contacts(update, context)
     
     update.message.reply_text(
         "🎯 Пожалуйста, выберите действие из меню:",
@@ -1770,39 +1801,6 @@ def handle_main_menu(update: Update, context: CallbackContext) -> None:
             admin_main_menu_keyboard if user_id in Config.ADMIN_CHAT_IDS else user_main_menu_keyboard, 
             resize_keyboard=True
         )
-    )
-
-def show_help(update: Update, context: CallbackContext) -> None:
-    """Показывает справку"""
-    help_text = (
-        "💻 *Помощь по боту IT отдела*\n\n"
-        "🎯 *Как создать заявку:*\n"
-        "1. Нажмите 'Создать заявку'\n"
-        "2. Заполните все шаги формы\n"
-        "3. Проверьте данные и отправьте\n\n"
-        "📋 *Просмотр заявок:*\n"
-        "• 'Мои заявки' - все ваши заявки\n"
-        "• Активные и выполненные раздельно\n\n"
-        "✏️ *Редактирование:*\n"
-        "• Можно редактировать активные заявки\n"
-        "• Изменить любые данные до выполнения\n\n"
-        "⏰ *Срочность:*\n"
-        "• 🔥 СРОЧНО - 1-2 часа\n"
-        "• ⚠️ СЕГОДНЯ - до конца дня\n"
-        "• 💤 НЕ СРОЧНО - 1-3 дня\n\n"
-        "📞 *Контакты IT отдела:*\n"
-        "• Телефон: +7 XXX XXX-XX-XX\n"
-        "• Email: it@company.com\n"
-        "• Кабинет: 3 этаж, каб. 301"
-    )
-    
-    user_id = update.message.from_user.id
-    keyboard = admin_main_menu_keyboard if user_id in Config.ADMIN_CHAT_IDS else user_main_menu_keyboard
-    
-    update.message.reply_text(
-        help_text,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
     )
 
 # ==================== ОСНОВНЫЕ ФУНКЦИИ БОТА ====================
@@ -1872,7 +1870,7 @@ def main() -> None:
         dispatcher.add_handler(CommandHandler('start', show_main_menu))
         dispatcher.add_handler(CommandHandler('menu', show_main_menu))
         dispatcher.add_handler(CommandHandler('admin', show_admin_panel))
-        dispatcher.add_handler(CommandHandler('help', show_help))
+        dispatcher.add_handler(CommandHandler('contacts', show_contacts))
         dispatcher.add_handler(CommandHandler('statistics', show_statistics))
         
         dispatcher.add_handler(conv_handler)
@@ -1884,13 +1882,13 @@ def main() -> None:
         
         # Обработчики главного меню
         dispatcher.add_handler(MessageHandler(Filters.regex(
-            '^(📂 Мои заявки|👑 Админ-панель|📊 Статистика|ℹ️ Помощь)$'), 
+            '^(📂 Мои заявки|👑 Админ-панель|📊 Статистика|📞 Контакты IT)$'), 
             handle_main_menu
         ))
         
         # Обработчики админ-панели
         dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные)$'), 
+            Filters.regex('^(🆕 Новые заявки|🔄 В работе|✅ Выполненные заявки)$'), 
             handle_admin_menu
         ))
         
@@ -1898,7 +1896,7 @@ def main() -> None:
         dispatcher.add_handler(CallbackQueryHandler(handle_admin_callback, pattern='^(take_|complete_|message_)'))
 
         # Запускаем бота
-        logger.info("🤖 Бот IT отдела запущен с улучшенным интерфейсом!")
+        logger.info("🤖 Бот IT отдела запущен с исправлениями!")
         logger.info(f"👑 Администраторы: {Config.ADMIN_CHAT_IDS}")
         
         updater.start_polling()
