@@ -51,3 +51,12 @@ def get_request_actions(request_id, current_status):
     keyboard.append([InlineKeyboardButton("📋 Назад к списку", callback_data='admin_all_requests')])
     
     return InlineKeyboardMarkup(keyboard)
+
+def get_confirmation_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_request"),
+            InlineKeyboardButton("❌ Отменить", callback_data="cancel_request")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
