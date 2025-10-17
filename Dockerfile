@@ -1,14 +1,10 @@
-FROM python:3.9
-
-ENV PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=on
+FROM python:3.9-slim
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
+COPY . .
 
-COPY . /app
-
-CMD ["python", "main.py"]
+CMD ["python", "bot/main.py"]
