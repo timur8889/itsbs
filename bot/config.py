@@ -1,39 +1,23 @@
-import os
-from dataclasses import dataclass, field
-from dotenv import load_dotenv
-
-load_dotenv()
-
-def get_admin_ids():
-    admin_ids = os.getenv('ADMIN_IDS', '')
-    return [int(x) for x in admin_ids.split(',') if x]
-
-@dataclass
-class BotConfig:
-    token: str = os.getenv('BOT_TOKEN', '')
-    admin_ids: list = field(default_factory=get_admin_ids)
-    db_url: str = os.getenv('DATABASE_URL', 'sqlite:///it_requests.db')
-
-class ITConfig:
-    categories = {
-        'hardware': '🖥️ Оборудование',
-        'software': '💻 Программное обеспечение',
-        'network': '🌐 Сеть и интернет',
-        'account': '👤 Учетные записи',
-        'other': '❓ Другое'
-    }
+def load_config():
+    """Загрузка и проверка конфигурации"""
+    from dotenv import load_dotenv
+    load_dotenv()
     
-    priorities = {
-        'low': '🟢 Низкий',
-        'medium': '🟡 Средний',
-        'high': '🔴 Высокий',
-        'critical': '💥 Критический'
-    }
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '')
+    DB_URL = os.getenv('DATABASE_URL', 'sqlite:///it_requests.db')
     
-    statuses = {
-        'new': '🆕 Новая',
-        'in_progress': '🔄 В работе',
-        'on_hold': '⏸️ На паузе',
-        'resolved': '✅ Решена',
-        'closed': '📋 Закрыта'
-    }
+    # Парсинг ADMIN_IDS
+    ADMIN_IDS = []
+    if ADMIN_IDS_STR:
+        try:
+            ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
+            print(f"✅ Parsed ADMIN_IDS: {ADMIN_IDS}")
+        except ValueError as e:
+            print(f"❌ Error parsing ADMIN_IDS: {e}")
+            ADMIN_IDS = []
+    
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN not set in .env file")
+    
+    return BOT_TOKEN, ADMIN_IDS, DB_URL
