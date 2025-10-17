@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  it-support-bot:
+    build: .
+    container_name: it_support_bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:///app/data/it_requests.db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Опционально: PostgreSQL вместо SQLite
+  postgres:
+    image: postgres:13
+    container_name: it_support_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: it_support
+      POSTGRES_USER: bot_user
+      POSTGRES_PASSWORD: bot_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
