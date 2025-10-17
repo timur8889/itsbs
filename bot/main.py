@@ -151,14 +151,17 @@ def main():
                 await query.edit_message_text("❌ Ошибка при получении заявок")
             finally:
                 session.close()
-        
-        # Admin panel
+
+        # ADMIN PANEL FUNCTIONS
+
+        # Admin panel main menu
         async def admin_panel(update, context):
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in config.admin_ids:
-                await query.answer("❌ Нет доступа", show_alert=True)
+            user_id = query.from_user.id
+            if user_id not in config.admin_ids:
+                await query.answer("❌ Нет доступа к админ панели", show_alert=True)
                 return
             
             session = db.get_session()
@@ -166,22 +169,30 @@ def main():
                 from database.models import ITRequest, Status
                 from sqlalchemy import func
                 
+                # Get statistics
                 total = session.query(ITRequest).count()
                 new = session.query(ITRequest).filter(ITRequest.status == Status.NEW).count()
                 in_progress = session.query(ITRequest).filter(ITRequest.status == Status.IN_PROGRESS).count()
+                resolved_today = session.query(ITRequest).filter(
+                    ITRequest.status == Status.RESOLVED,
+                    func.date(ITRequest.updated_at) == func.current_date()
+                ).count()
                 
-                stats_text = f"""👨‍💼 Панель администратора
+                stats_text = f"""👨‍💼 Панель администратора IT-отдела
 
-📊 Статистика:
+📊 Статистика за сегодня:
 • 📋 Всего заявок: {total}
 • 🆕 Новых: {new}
-• 🔄 В работе: {in_progress}"""
+• 🔄 В работе: {in_progress}
+• ✅ Решено сегодня: {resolved_today}
+
+Выберите действие:"""
                 
                 keyboard = [
                     [InlineKeyboardButton("📋 Все заявки", callback_data="admin_all_requests")],
                     [InlineKeyboardButton("🆕 Новые заявки", callback_data="admin_new_requests")],
                     [InlineKeyboardButton("🔄 В работе", callback_data="admin_in_progress")],
-                    [InlineKeyboardButton("📈 Подробная статистика", callback_data="admin_detailed_stats")],
+                    [InlineKeyboardButton("📈 Детальная статистика", callback_data="admin_detailed_stats")],
                     [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -190,10 +201,10 @@ def main():
                 
             except Exception as e:
                 logger.error(f"Error in admin panel: {e}")
-                await query.edit_message_text("❌ Ошибка в админ панели")
+                await query.edit_message_text("❌ Ошибка при загрузке админ панели")
             finally:
                 session.close()
-        
+
         # Admin: Show all requests
         async def admin_all_requests(update, context):
             query = update.callback_query
@@ -208,43 +219,53 @@ def main():
                 from database.models import ITRequest
                 requests = session.query(ITRequest).order_by(
                     ITRequest.created_at.desc()
-                ).limit(20).all()
+                ).limit(15).all()
                 
                 if not requests:
                     await query.edit_message_text(
-                        "📭 Нет заявок",
+                        "📭 Нет заявок в системе",
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+                            InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")
                         ]])
                     )
                     return
                 
-                text = "📋 Последние 20 заявок:\n\n"
+                text = "📋 Последние заявки в системе:\n\n"
                 
                 for req in requests:
-                    status_icons = {'new': '🆕', 'in_progress': '🔄', 'on_hold': '⏸️', 'resolved': '✅', 'closed': '📋'}
-                    priority_icons = {'low': '🟢', 'medium': '🟡', 'high': '🔴', 'critical': '💥'}
+                    status_icons = {
+                        'new': '🆕', 
+                        'in_progress': '🔄', 
+                        'on_hold': '⏸️', 
+                        'resolved': '✅', 
+                        'closed': '📋'
+                    }
+                    priority_icons = {
+                        'low': '🟢', 
+                        'medium': '🟡', 
+                        'high': '🔴', 
+                        'critical': '💥'
+                    }
                     
                     status_icon = status_icons.get(req.status.value, '❓')
                     priority_icon = priority_icons.get(req.priority.value, '⚪')
                     
-                    text += f"{status_icon} {priority_icon} #{req.id}: {req.title[:30]}...\n"
-                    text += f"   👤 {req.full_name} | 🏢 {req.location}\n"
-                    text += f"   🕐 {req.created_at.strftime('%d.%m %H:%M')}\n"
-                    
-                    # Add action buttons for each request
-                    context.user_data[f'req_{req.id}'] = req.id
+                    text += f"{status_icon}{priority_icon} #{req.id}: {req.title}\n"
+                    text += f"   👤 {req.full_name} | 🏢 {req.location or 'Не указано'}\n"
+                    text += f"   🕐 {req.created_at.strftime('%d.%m %H:%M')}\n\n"
                 
+                # Create buttons for first 5 requests
                 keyboard = []
-                for req in requests[:5]:  # Show buttons for first 5 requests
+                for req in requests[:5]:
                     keyboard.append([
-                        InlineKeyboardButton(f"📝 #{req.id}", callback_data=f"admin_view_{req.id}")
+                        InlineKeyboardButton(f"📝 #{req.id} - {req.title[:15]}...", 
+                                          callback_data=f"admin_view_{req.id}")
                     ])
                 
                 keyboard.extend([
-                    [InlineKeyboardButton("🆕 Новые", callback_data="admin_new_requests")],
-                    [InlineKeyboardButton("🔄 В работе", callback_data="admin_in_progress")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+                    [InlineKeyboardButton("🆕 Только новые", callback_data="admin_new_requests")],
+                    [InlineKeyboardButton("🔄 Только в работе", callback_data="admin_in_progress")],
+                    [InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")]
                 ])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -252,10 +273,10 @@ def main():
                 
             except Exception as e:
                 logger.error(f"Error getting all requests: {e}")
-                await query.edit_message_text("❌ Ошибка при получении заявок")
+                await query.edit_message_text("❌ Ошибка при загрузке заявок")
             finally:
                 session.close()
-        
+
         # Admin: View specific request
         async def admin_view_request(update, context):
             query = update.callback_query
@@ -273,64 +294,99 @@ def main():
                 request = session.query(ITRequest).filter(ITRequest.id == request_id).first()
                 
                 if not request:
-                    await query.answer("Заявка не найдена", show_alert=True)
+                    await query.answer("❌ Заявка не найдена", show_alert=True)
                     return
                 
-                status_icons = {'new': '🆕', 'in_progress': '🔄', 'on_hold': '⏸️', 'resolved': '✅', 'closed': '📋'}
-                priority_icons = {'low': '🟢', 'medium': '🟡', 'high': '🔴', 'critical': '💥'}
+                # Format request details
+                status_icons = {
+                    'new': '🆕', 
+                    'in_progress': '🔄', 
+                    'on_hold': '⏸️', 
+                    'resolved': '✅', 
+                    'closed': '📋'
+                }
+                priority_icons = {
+                    'low': '🟢', 
+                    'medium': '🟡', 
+                    'high': '🔴', 
+                    'critical': '💥'
+                }
                 
-                text = f"""📋 Заявка #{request.id}
+                category_names = {
+                    'hardware': '🖥️ Оборудование',
+                    'software': '💻 ПО',
+                    'network': '🌐 Сеть',
+                    'account': '👤 Учетные записи',
+                    'other': '❓ Другое'
+                }
+                
+                text = f"""📋 ЗАЯВКА #{request.id}
 ━━━━━━━━━━━━━━━━━━━━
 
-👤 Сотрудник: {request.full_name}
-📞 Телефон: {request.contact_phone}
-🏢 Местоположение: {request.location}
+👤 <b>Сотрудник:</b> {request.full_name}
+📱 <b>Username:</b> @{request.username or 'не указан'}
+📞 <b>Телефон:</b> {request.contact_phone}
+🏢 <b>Местоположение:</b> {request.location or 'Не указано'}
 
-📂 Категория: {request.category.value}
-🚨 Приоритет: {priority_icons.get(request.priority.value)} {request.priority.value}
-📊 Статус: {status_icons.get(request.status.value)} {request.status.value}
+📂 <b>Категория:</b> {category_names.get(request.category.value, request.category.value)}
+🚨 <b>Приоритет:</b> {priority_icons.get(request.priority.value)} {request.priority.value}
+📊 <b>Статус:</b> {status_icons.get(request.status.value)} {request.status.value}
 
-📝 Тема: {request.title}
-📄 Описание:
+📝 <b>Тема:</b> {request.title}
+📄 <b>Описание:</b>
 {request.description}"""
                 
                 if request.assigned_to:
-                    text += f"\n\n👨‍💼 Исполнитель: {request.assigned_to}"
+                    text += f"\n\n👨‍💼 <b>Исполнитель:</b> {request.assigned_to}"
                 
                 if request.solution:
-                    text += f"\n\n💡 Решение:\n{request.solution}"
+                    text += f"\n\n💡 <b>Решение:</b>\n{request.solution}"
                 
-                text += f"\n\n⏰ Создана: {request.created_at.strftime('%d.%m.%Y %H:%M')}"
+                text += f"\n\n⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}"
+                if request.updated_at != request.created_at:
+                    text += f"\n✏️ <b>Обновлена:</b> {request.updated_at.strftime('%d.%m.%Y %H:%M')}"
                 
-                # Action buttons based on current status
+                # Create action buttons based on current status
                 keyboard = []
                 
                 if request.status.value == 'new':
-                    keyboard.append([InlineKeyboardButton("🔄 Взять в работу", callback_data=f"admin_take_{request.id}")])
+                    keyboard.append([
+                        InlineKeyboardButton("🔄 Взять в работу", callback_data=f"admin_take_{request.id}")
+                    ])
                 
                 if request.status.value in ['new', 'in_progress']:
-                    keyboard.append([InlineKeyboardButton("⏸️ На паузу", callback_data=f"admin_hold_{request.id}")])
-                    keyboard.append([InlineKeyboardButton("✅ Решено", callback_data=f"admin_resolve_{request.id}")])
+                    keyboard.append([
+                        InlineKeyboardButton("⏸️ На паузу", callback_data=f"admin_hold_{request.id}"),
+                        InlineKeyboardButton("✅ Решено", callback_data=f"admin_resolve_{request.id}")
+                    ])
                 
                 if request.status.value in ['on_hold', 'resolved']:
-                    keyboard.append([InlineKeyboardButton("🔄 Вернуть в работу", callback_data=f"admin_retake_{request.id}")])
+                    keyboard.append([
+                        InlineKeyboardButton("🔄 Вернуть в работу", callback_data=f"admin_retake_{request.id}")
+                    ])
                 
                 if request.status.value == 'resolved':
-                    keyboard.append([InlineKeyboardButton("📋 Закрыть", callback_data=f"admin_close_{request.id}")])
+                    keyboard.append([
+                        InlineKeyboardButton("📋 Закрыть", callback_data=f"admin_close_{request.id}")
+                    ])
                 
-                keyboard.append([InlineKeyboardButton("✏️ Добавить решение", callback_data=f"admin_solution_{request.id}")])
-                keyboard.append([InlineKeyboardButton("📋 Все заявки", callback_data="admin_all_requests")])
-                keyboard.append([InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")])
+                keyboard.append([
+                    InlineKeyboardButton("✏️ Добавить решение", callback_data=f"admin_solution_{request.id}")
+                ])
+                keyboard.append([
+                    InlineKeyboardButton("📋 Все заявки", callback_data="admin_all_requests"),
+                    InlineKeyboardButton("🔙 В админку", callback_data="admin_panel")
+                ])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(text, reply_markup=reply_markup)
+                await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
                 
             except Exception as e:
                 logger.error(f"Error viewing request {request_id}: {e}")
-                await query.edit_message_text("❌ Ошибка при просмотре заявки")
+                await query.edit_message_text("❌ Ошибка при загрузке заявки")
             finally:
                 session.close()
-        
+
         # Admin: Take request
         async def admin_take_request(update, context):
             query = update.callback_query
@@ -356,22 +412,24 @@ def main():
                     try:
                         await context.bot.send_message(
                             chat_id=request.user_id,
-                            text=f"🔄 Ваша заявка #{request_id} взята в работу\nИсполнитель: {query.from_user.full_name}"
+                            text=f"🔄 Ваша заявка #{request_id} взята в работу\n\nИсполнитель: {query.from_user.full_name}"
                         )
                     except Exception as e:
                         logger.error(f"Could not notify user: {e}")
                     
                     await query.answer("✅ Заявка взята в работу")
+                    # Refresh the request view
                     await admin_view_request(update, context)
                 else:
                     await query.answer("❌ Заявка не найдена", show_alert=True)
                     
             except Exception as e:
                 logger.error(f"Error taking request: {e}")
-                await query.answer("❌ Ошибка", show_alert=True)
+                session.rollback()
+                await query.answer("❌ Ошибка при взятии заявки", show_alert=True)
             finally:
                 session.close()
-        
+
         # Admin: Update request status
         async def admin_update_status(update, context):
             query = update.callback_query
@@ -391,6 +449,13 @@ def main():
                 'close': 'closed'
             }
             
+            status_messages = {
+                'hold': "⏸️ приостановлена",
+                'resolve': "✅ решена", 
+                'retake': "🔄 возвращена в работу",
+                'close': "📋 закрыта"
+            }
+            
             session = db.get_session()
             try:
                 from database.models import ITRequest, Status
@@ -406,32 +471,27 @@ def main():
                     session.commit()
                     
                     # Notify user
-                    status_messages = {
-                        'hold': f"⏸️ Заявка #{request_id} приостановлена",
-                        'resolve': f"✅ Заявка #{request_id} решена", 
-                        'retake': f"🔄 Заявка #{request_id} возвращена в работу",
-                        'close': f"📋 Заявка #{request_id} закрыта"
-                    }
-                    
                     try:
                         await context.bot.send_message(
                             chat_id=request.user_id,
-                            text=status_messages[action]
+                            text=f"📢 Ваша заявка #{request_id} {status_messages[action]}"
                         )
                     except Exception as e:
                         logger.error(f"Could not notify user: {e}")
                     
-                    await query.answer(f"Статус обновлен: {new_status}")
+                    await query.answer(f"✅ Статус обновлен: {new_status}")
+                    # Refresh the request view
                     await admin_view_request(update, context)
                 else:
-                    await query.answer("❌ Ошибка обновления", show_alert=True)
+                    await query.answer("❌ Ошибка обновления статуса", show_alert=True)
                     
             except Exception as e:
                 logger.error(f"Error updating status: {e}")
-                await query.answer("❌ Ошибка", show_alert=True)
+                session.rollback()
+                await query.answer("❌ Ошибка при обновлении статуса", show_alert=True)
             finally:
                 session.close()
-        
+
         # Admin: Add solution
         async def admin_add_solution(update, context):
             query = update.callback_query
@@ -442,18 +502,18 @@ def main():
                 return
             
             request_id = int(query.data.replace('admin_solution_', ''))
-            context.user_data['editing_solution'] = request_id
+            context.user_data['editing_solution_for'] = request_id
             
             await query.message.reply_text(
                 "💡 Введите решение по заявке:"
             )
-        
+
         # Save solution
         async def save_solution(update, context):
-            if 'editing_solution' not in context.user_data:
+            if 'editing_solution_for' not in context.user_data:
                 return
             
-            request_id = context.user_data['editing_solution']
+            request_id = context.user_data['editing_solution_for']
             solution = update.message.text
             
             session = db.get_session()
@@ -477,16 +537,17 @@ def main():
                     await update.message.reply_text("✅ Решение сохранено")
                     
                     # Clear editing state
-                    context.user_data.pop('editing_solution', None)
+                    context.user_data.pop('editing_solution_for', None)
                 else:
                     await update.message.reply_text("❌ Заявка не найдена")
                     
             except Exception as e:
                 logger.error(f"Error saving solution: {e}")
-                await update.message.reply_text("❌ Ошибка сохранения")
+                session.rollback()
+                await update.message.reply_text("❌ Ошибка при сохранении решения")
             finally:
                 session.close()
-        
+
         # Admin: Detailed stats
         async def admin_detailed_stats(update, context):
             query = update.callback_query
@@ -498,8 +559,9 @@ def main():
             
             session = db.get_session()
             try:
-                from database.models import ITRequest, Status, Category
+                from database.models import ITRequest, Status, Category, Priority
                 from sqlalchemy import func
+                from datetime import datetime, date, timedelta
                 
                 # Basic counts
                 total = session.query(ITRequest).count()
@@ -509,14 +571,19 @@ def main():
                 closed = session.query(ITRequest).filter(ITRequest.status == Status.CLOSED).count()
                 
                 # Today's stats
-                from datetime import datetime, date
                 today = date.today()
                 today_requests = session.query(ITRequest).filter(
                     func.date(ITRequest.created_at) == today
                 ).count()
                 today_resolved = session.query(ITRequest).filter(
                     func.date(ITRequest.updated_at) == today,
-                    ITRequest.status == Status.RESOLVED
+                    ITRequest.status.in_([Status.RESOLVED, Status.CLOSED])
+                ).count()
+                
+                # This week stats
+                week_ago = today - timedelta(days=7)
+                week_requests = session.query(ITRequest).filter(
+                    ITRequest.created_at >= week_ago
                 ).count()
                 
                 # Category stats
@@ -524,9 +591,29 @@ def main():
                 for category in Category:
                     count = session.query(ITRequest).filter(ITRequest.category == category).count()
                     if count > 0:
-                        category_stats.append(f"• {category.value}: {count}")
+                        category_name = {
+                            'hardware': '🖥️ Оборудование',
+                            'software': '💻 ПО',
+                            'network': '🌐 Сеть', 
+                            'account': '👤 Учетные записи',
+                            'other': '❓ Другое'
+                        }.get(category.value, category.value)
+                        category_stats.append(f"• {category_name}: {count}")
                 
-                stats_text = f"""📈 Детальная статистика
+                # Priority stats
+                priority_stats = []
+                for priority in Priority:
+                    count = session.query(ITRequest).filter(ITRequest.priority == priority).count()
+                    if count > 0:
+                        priority_name = {
+                            'low': '🟢 Низкий',
+                            'medium': '🟡 Средний',
+                            'high': '🔴 Высокий',
+                            'critical': '💥 Критический'
+                        }.get(priority.value, priority.value)
+                        priority_stats.append(f"• {priority_name}: {count}")
+                
+                stats_text = f"""📈 Детальная статистика IT-отдела
 
 📊 Общая статистика:
 • 📋 Всего заявок: {total}
@@ -535,12 +622,15 @@ def main():
 • ✅ Решено: {resolved}
 • 📋 Закрыто: {closed}
 
-📅 Сегодня:
-• 📥 Новых заявок: {today_requests}
-• ✅ Решено заявок: {today_resolved}
+📅 За последнее время:
+• 📥 Сегодня: {today_requests} новых, {today_resolved} решено
+• 📈 За неделю: {week_requests} заявок
 
-📂 По категориям:
-{chr(10).join(category_stats)}"""
+📂 Распределение по категориям:
+{chr(10).join(category_stats)}
+
+🚨 Распределение по приоритетам:
+{chr(10).join(priority_stats)}"""
                 
                 keyboard = [
                     [InlineKeyboardButton("📋 Все заявки", callback_data="admin_all_requests")],
@@ -555,8 +645,8 @@ def main():
                 await query.edit_message_text("❌ Ошибка получения статистики")
             finally:
                 session.close()
-        
-        # Filtered requests for admin
+
+        # Admin: Filtered requests
         async def admin_filtered_requests(update, context):
             query = update.callback_query
             await query.answer()
@@ -572,6 +662,11 @@ def main():
                 'in_progress': 'in_progress'
             }
             
+            filter_names = {
+                'new': '🆕 Новые',
+                'in_progress': '🔄 В работе'
+            }
+            
             session = db.get_session()
             try:
                 from database.models import ITRequest, Status
@@ -581,12 +676,7 @@ def main():
                         ITRequest.status == Status(status_map[filter_type])
                     ).order_by(ITRequest.created_at.desc()).limit(20).all()
                     
-                    filter_names = {
-                        'new': '🆕 Новые',
-                        'in_progress': '🔄 В работе'
-                    }
-                    
-                    text = f"📋 {filter_names[filter_type]} заявки:\n\n"
+                    text = f"{filter_names[filter_type]} заявки:\n\n"
                     
                     if not requests:
                         text += "Заявок нет"
@@ -595,8 +685,8 @@ def main():
                             status_icons = {'new': '🆕', 'in_progress': '🔄'}
                             priority_icons = {'low': '🟢', 'medium': '🟡', 'high': '🔴', 'critical': '💥'}
                             
-                            text += f"{status_icons[req.status.value]} {priority_icons[req.priority.value]} #{req.id}: {req.title[:30]}...\n"
-                            text += f"   👤 {req.full_name} | 🏢 {req.location}\n"
+                            text += f"{status_icons[req.status.value]} {priority_icons[req.priority.value]} #{req.id}: {req.title}\n"
+                            text += f"   👤 {req.full_name} | 🏢 {req.location or 'Не указано'}\n"
                             text += f"   🕐 {req.created_at.strftime('%d.%m %H:%M')}\n\n"
                     
                     keyboard = []
@@ -615,12 +705,14 @@ def main():
                 
             except Exception as e:
                 logger.error(f"Error getting filtered requests: {e}")
-                await query.edit_message_text("❌ Ошибка при получении заявок")
+                await query.edit_message_text("❌ Ошибка при загрузке заявок")
             finally:
                 session.close()
-        
-        # Request creation conversation states
-        TITLE, DESCRIPTION, LOCATION, PHONE = range(4)
+
+        # REQUEST CREATION SYSTEM
+
+        # Conversation states
+        CATEGORY, PRIORITY, TITLE, DESCRIPTION, LOCATION, PHONE = range(6)
         
         # Start creating request
         async def start_create_request(update, context):
@@ -628,9 +720,15 @@ def main():
             await query.answer()
             
             # Initialize user data
-            user_sessions[query.from_user.id] = {
-                'category': 'other',
-                'priority': 'medium'
+            user_id = query.from_user.id
+            user_sessions[user_id] = {
+                'step': 'category',
+                'category': None,
+                'priority': None,
+                'title': None,
+                'description': None,
+                'location': None,
+                'contact_phone': None
             }
             
             # Ask for category
@@ -639,7 +737,8 @@ def main():
                 [InlineKeyboardButton("💻 ПО", callback_data="cat_software")],
                 [InlineKeyboardButton("🌐 Сеть", callback_data="cat_network")],
                 [InlineKeyboardButton("👤 Учетные записи", callback_data="cat_account")],
-                [InlineKeyboardButton("❓ Другое", callback_data="cat_other")]
+                [InlineKeyboardButton("❓ Другое", callback_data="cat_other")],
+                [InlineKeyboardButton("🔙 Отмена", callback_data="main_menu")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -647,21 +746,29 @@ def main():
                 "📂 Выберите категорию проблемы:",
                 reply_markup=reply_markup
             )
-        
+            return CATEGORY
+
         # Handle category selection
         async def handle_category(update, context):
             query = update.callback_query
             await query.answer()
             
+            user_id = query.from_user.id
+            if user_id not in user_sessions:
+                await query.edit_message_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             category = query.data.replace('cat_', '')
-            user_sessions[query.from_user.id]['category'] = category
+            user_sessions[user_id]['category'] = category
+            user_sessions[user_id]['step'] = 'priority'
             
             # Ask for priority
             keyboard = [
                 [InlineKeyboardButton("🟢 Низкий", callback_data="pri_low")],
                 [InlineKeyboardButton("🟡 Средний", callback_data="pri_medium")],
                 [InlineKeyboardButton("🔴 Высокий", callback_data="pri_high")],
-                [InlineKeyboardButton("💥 Критический", callback_data="pri_critical")]
+                [InlineKeyboardButton("💥 Критический", callback_data="pri_critical")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_categories")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -669,75 +776,106 @@ def main():
                 "🚨 Выберите приоритет заявки:",
                 reply_markup=reply_markup
             )
-        
-        # Handle priority selection and start conversation
+            return PRIORITY
+
+        # Handle priority selection
         async def handle_priority(update, context):
             query = update.callback_query
             await query.answer()
             
+            if query.data == 'back_to_categories':
+                return await start_create_request(update, context)
+            
+            user_id = query.from_user.id
+            if user_id not in user_sessions:
+                await query.edit_message_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             priority = query.data.replace('pri_', '')
-            user_sessions[query.from_user.id]['priority'] = priority
+            user_sessions[user_id]['priority'] = priority
+            user_sessions[user_id]['step'] = 'title'
             
             await query.edit_message_text(
                 "📝 Введите краткое описание проблемы (максимум 200 символов):\n\n"
                 "Пример: 'Не работает мышь на компьютере'"
             )
-            
             return TITLE
-        
+
         # Handle title input
         async def handle_title(update, context):
+            user_id = update.effective_user.id
+            if user_id not in user_sessions:
+                await update.message.reply_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             title = update.message.text.strip()
             if len(title) > 200:
                 await update.message.reply_text("❌ Слишком длинное описание. Максимум 200 символов. Попробуйте еще раз:")
                 return TITLE
             
-            user_sessions[update.effective_user.id]['title'] = title
+            user_sessions[user_id]['title'] = title
+            user_sessions[user_id]['step'] = 'description'
             
             await update.message.reply_text(
                 "📄 Опишите проблему подробно:\n\n"
                 "Укажите все детали, которые помогут нам быстрее решить проблему"
             )
-            
             return DESCRIPTION
-        
+
         # Handle description input
         async def handle_description(update, context):
+            user_id = update.effective_user.id
+            if user_id not in user_sessions:
+                await update.message.reply_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             description = update.message.text.strip()
             if len(description) < 10:
                 await update.message.reply_text("❌ Слишком короткое описание. Минимум 10 символов. Попробуйте еще раз:")
                 return DESCRIPTION
             
-            user_sessions[update.effective_user.id]['description'] = description
+            user_sessions[user_id]['description'] = description
+            user_sessions[user_id]['step'] = 'location'
             
             await update.message.reply_text(
                 "🏢 Укажите ваше местоположение:\n\n"
                 "Пример: 'Цех №5, кабинет 203' или 'Главный офис, 3 этаж'"
             )
-            
             return LOCATION
-        
+
         # Handle location input
         async def handle_location(update, context):
+            user_id = update.effective_user.id
+            if user_id not in user_sessions:
+                await update.message.reply_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             location = update.message.text.strip()
-            user_sessions[update.effective_user.id]['location'] = location
+            user_sessions[user_id]['location'] = location
+            user_sessions[user_id]['step'] = 'phone'
             
             await update.message.reply_text(
                 "📞 Укажите ваш контактный телефон:\n\n"
                 "Формат: +7 XXX XXX-XX-XX или 8 XXX XXX-XX-XX"
             )
-            
             return PHONE
-        
+
         # Handle phone input and save request
         async def handle_phone(update, context):
+            user_id = update.effective_user.id
+            if user_id not in user_sessions:
+                await update.message.reply_text("❌ Сессия истекла. Начните заново.")
+                return ConversationHandler.END
+            
             phone = update.message.text.strip()
-            user_data = user_sessions.get(update.effective_user.id, {})
             
             # Simple phone validation
             if len(phone) < 5:
                 await update.message.reply_text("❌ Неверный формат телефона. Попробуйте еще раз:")
                 return PHONE
+            
+            user_data = user_sessions[user_id]
+            user_data['contact_phone'] = phone
             
             # Save to database
             session = db.get_session()
@@ -745,15 +883,15 @@ def main():
                 from database.models import ITRequest, Category, Priority
                 
                 new_request = ITRequest(
-                    user_id=update.effective_user.id,
+                    user_id=user_id,
                     username=update.effective_user.username,
                     full_name=update.effective_user.full_name,
-                    category=Category(user_data.get('category', 'other')),
-                    priority=Priority(user_data.get('priority', 'medium')),
-                    title=user_data.get('title', ''),
-                    description=user_data.get('description', ''),
-                    location=user_data.get('location', ''),
-                    contact_phone=phone
+                    category=Category(user_data['category']),
+                    priority=Priority(user_data['priority']),
+                    title=user_data['title'],
+                    description=user_data['description'],
+                    location=user_data['location'],
+                    contact_phone=user_data['contact_phone']
                 )
                 
                 session.add(new_request)
@@ -777,10 +915,10 @@ def main():
             finally:
                 session.close()
                 # Clean up user data
-                user_sessions.pop(update.effective_user.id, None)
+                user_sessions.pop(user_id, None)
             
             return ConversationHandler.END
-        
+
         async def notify_admins(context, request):
             from config import BotConfig
             
@@ -808,13 +946,14 @@ def main():
                     )
                 except Exception as e:
                     logger.error(f"Failed to notify admin {admin_id}: {e}")
-        
+
         # Cancel conversation
         async def cancel(update, context):
-            user_sessions.pop(update.effective_user.id, None)
-            await update.message.reply_text("Создание заявки отменено.")
+            user_id = update.effective_user.id
+            user_sessions.pop(user_id, None)
+            await update.message.reply_text("❌ Создание заявки отменено.")
             return ConversationHandler.END
-        
+
         # Main button handler
         async def button_handler(update, context):
             query = update.callback_query
@@ -840,13 +979,7 @@ def main():
                 await admin_view_request(update, context)
             elif query.data.startswith('admin_take_'):
                 await admin_take_request(update, context)
-            elif query.data.startswith('admin_hold_'):
-                await admin_update_status(update, context)
-            elif query.data.startswith('admin_resolve_'):
-                await admin_update_status(update, context)
-            elif query.data.startswith('admin_retake_'):
-                await admin_update_status(update, context)
-            elif query.data.startswith('admin_close_'):
+            elif query.data.startswith('admin_hold_') or query.data.startswith('admin_resolve_') or query.data.startswith('admin_retake_') or query.data.startswith('admin_close_'):
                 await admin_update_status(update, context)
             elif query.data.startswith('admin_solution_'):
                 await admin_add_solution(update, context)
@@ -856,21 +989,29 @@ def main():
                 await handle_priority(update, context)
             elif query.data == 'main_menu':
                 await start(update, context)
-        
+            elif query.data == 'back_to_categories':
+                await start_create_request(update, context)
+
         # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("admin", admin_panel))
         
         # Conversation handler for creating requests
         conv_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(handle_priority, pattern='^pri_')],
+            entry_points=[CallbackQueryHandler(handle_category, pattern='^cat_')],
             states={
+                CATEGORY: [CallbackQueryHandler(handle_category, pattern='^cat_')],
+                PRIORITY: [CallbackQueryHandler(handle_priority, pattern='^pri_|back_to_categories')],
                 TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title)],
                 DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_description)],
                 LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_location)],
                 PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
             },
-            fallbacks=[CommandHandler('cancel', cancel)]
+            fallbacks=[
+                CommandHandler('cancel', cancel),
+                CallbackQueryHandler(cancel, pattern='^main_menu$')
+            ]
         )
         application.add_handler(conv_handler)
         
