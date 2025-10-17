@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
 from database.models import Database
 from keyboards.inline import get_main_menu, get_admin_keyboard
@@ -28,7 +28,7 @@ class StartHandler:
         keyboard = get_main_menu()
         
         # Добавляем админскую панель для администраторов
-        if str(user.id) in BotConfig.admin_ids:
+        if user.id in BotConfig.admin_ids:
             keyboard = InlineKeyboardMarkup(
                 keyboard.inline_keyboard + 
                 [[InlineKeyboardButton("👨‍💼 Панель администратора", callback_data='admin_panel')]]
@@ -68,14 +68,15 @@ class StartHandler:
         
         if update.message:
             await update.message.reply_text(help_text, parse_mode='HTML')
+            await self.start(update, context)
         else:
             await update.callback_query.edit_message_text(help_text, parse_mode='HTML')
-        
-        await self.start(update, context)
+            await self.start(update, context)
     
     def get_handlers(self):
         return [
             CommandHandler('start', self.start),
             CommandHandler('help', self.help_command),
-            CallbackQueryHandler(self.start, pattern='^main_menu$')
+            CallbackQueryHandler(self.start, pattern='^main_menu$'),
+            CallbackQueryHandler(self.help_command, pattern='^help$')
         ]
