@@ -1,7 +1,7 @@
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
-from database.models import Database, Category, Priority, Status
-from keyboards.inline import get_categories_keyboard, get_priorities_keyboard, get_main_menu
+from database.models import Database, Category, Priority, Status, ITRequest
+from keyboards.inline import get_categories_keyboard, get_priorities_keyboard, get_main_menu, get_confirmation_keyboard
 from utils.validators import format_request_text, validate_phone
 import re
 
@@ -11,10 +11,12 @@ CATEGORY, PRIORITY, TITLE, DESCRIPTION, LOCATION, PHONE, CONFIRM = range(7)
 class RequestHandlers:
     def __init__(self, db: Database):
         self.db = db
-        self.user_data = {}
     
     async def create_request_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.edit_message_text(
+        query = update.callback_query
+        await query.answer()
+        
+        await query.edit_message_text(
             "📂 <b>Выберите категорию проблемы:</b>",
             reply_markup=get_categories_keyboard(),
             parse_mode='HTML'
@@ -112,6 +114,7 @@ class RequestHandlers:
         
         # Формируем подтверждение
         request_data = {
+            'id': 'NEW',
             'category': context.user_data['category'],
             'priority': context.user_data['priority'],
             'title': context.user_data['title'],
@@ -119,22 +122,17 @@ class RequestHandlers:
             'location': context.user_data['location'],
             'contact_phone': phone,
             'full_name': update.effective_user.full_name,
-            'username': update.effective_user.username
+            'username': update.effective_user.username or 'Не указан',
+            'status': 'new',
+            'created_at': 'Сейчас'
         }
         
         confirmation_text = format_request_text(request_data)
         confirmation_text += "\n\n✅ <b>Все верно? Подтвердите создание заявки:</b>"
         
-        keyboard = [
-            [
-                {"text": "✅ Подтвердить", "callback_data": "confirm_request"},
-                {"text": "❌ Отменить", "callback_data": "cancel_request"}
-            ]
-        ]
-        
         await update.message.reply_text(
             confirmation_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=get_confirmation_keyboard(),
             parse_mode='HTML'
         )
         return CONFIRM
@@ -169,7 +167,8 @@ class RequestHandlers:
                     f"✅ <b>Заявка #{new_request.id} успешно создана!</b>\n\n"
                     f"Мы уведомили IT-отдел. С вами свяжутся в ближайшее время.\n"
                     f"Для отслеживания статуса используйте меню '📋 Мои заявки'",
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    reply_markup=get_main_menu()
                 )
                 
             except Exception as e:
@@ -177,7 +176,8 @@ class RequestHandlers:
                 await query.edit_message_text(
                     "❌ <b>Произошла ошибка при создании заявки.</b>\n\n"
                     "Попробуйте еще раз или обратитесь в IT-отдел напрямую.",
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    reply_markup=get_main_menu()
                 )
             finally:
                 session.close()
@@ -210,8 +210,11 @@ class RequestHandlers:
                 print(f"Не удалось отправить уведомление администратору {admin_id}: {e}")
     
     async def cancel_request(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
         context.user_data.clear()
-        await update.callback_query.edit_message_text(
+        await query.edit_message_text(
             "Создание заявки отменено.",
             reply_markup=get_main_menu()
         )
