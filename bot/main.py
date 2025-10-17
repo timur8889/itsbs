@@ -1,10 +1,7 @@
 import logging
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from config import BotConfig
 from database.models import Database
-from handlers.start import StartHandler
-from handlers.requests import RequestHandlers
-from handlers.admin import AdminHandlers
 
 # Настройка логирования
 logging.basicConfig(
@@ -13,50 +10,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class ITSupportBot:
-    def __init__(self, token: str, db_url: str):
-        self.application = Application.builder().token(token).build()
-        self.db = Database(db_url)
-        
-        # Инициализация обработчиков
-        self.start_handler = StartHandler(self.db)
-        self.request_handlers = RequestHandlers(self.db)
-        self.admin_handlers = AdminHandlers(self.db)
-        
-        self.setup_handlers()
-    
-    def setup_handlers(self):
-        # Базовые команды
-        for handler in self.start_handler.get_handlers():
-            self.application.add_handler(handler)
-        
-        # Обработка заявок
-        self.application.add_handler(
-            self.request_handlers.get_conversation_handler()
-        )
-        
-        # Админские обработчики
-        for handler in self.admin_handlers.get_handlers():
-            self.application.add_handler(handler)
-        
-        # Обработка ошибок
-        self.application.add_error_handler(self.error_handler)
-    
-    async def error_handler(self, update: object, context):
-        logger.error(msg="Exception while handling an update:", exc_info=context.error)
-    
-    def run(self):
-        self.application.run_polling()
-
 def main():
     config = BotConfig()
     
     if not config.token:
         raise ValueError("BOT_TOKEN не установлен в переменных окружения")
     
-    bot = ITSupportBot(config.token, config.db_url)
+    # Инициализация базы данных
+    db = Database(config.db_url)
+    
+    # Создание приложения
+    application = Application.builder().token(config.token).build()
+    
+    # Базовые команды
+    async def start(update, context):
+        user = update.effective_user
+        welcome_text = f"👋 Добро пожаловать, {user.first_name}!\n\nЯ - бот IT-отдела завода 'Контакт'."
+        
+        keyboard = [
+            [{"text": "📝 Создать заявку", "callback_data": "create_request"}],
+            [{"text": "📋 Мои заявки", "callback_data": "my_requests"}],
+            [{"text": "ℹ️ Справка", "callback_data": "help"}]
+        ]
+        
+        if user.id in config.admin_ids:
+            keyboard.append([{"text": "👨‍💼 Панель администратора", "callback_data": "admin_panel"}])
+        
+        reply_markup = {"inline_keyboard": keyboard}
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", start))
+    
+    # Простой обработчик для кнопки создания заявки
+    async def button_handler(update, context):
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'create_request':
+            await query.edit_message_text(
+                "📂 <b>Выберите категорию проблемы:</b>",
+                parse_mode='HTML'
+            )
+        elif query.data == 'help':
+            await query.edit_message_text(
+                "ℹ️ <b>Справка:</b>\n\nДля создания заявки нажмите '📝 Создать заявку'",
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(f"Вы выбрали: {query.data}")
+    
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
     print("🤖 Бот IT-отдела завода 'Контакт' запущен...")
-    bot.run()
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
