@@ -58,7 +58,7 @@ class ITRequest(Base):
             'description': self.description,
             'location': self.location,
             'contact_phone': self.contact_phone,
-            'created_at': self.created_at.isoformat(),
+            'created_at': self.created_at,
             'assigned_to': self.assigned_to,
             'solution': self.solution
         }
