@@ -2,8 +2,9 @@ import re
 from datetime import datetime
 
 def validate_phone(phone: str) -> bool:
-    pattern = r'^(\+7|8)?[\s\-]?\(?[489][0-9]{2}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}$'
-    return bool(re.match(pattern, phone))
+    # Упрощенная валидация российских номеров
+    cleaned = re.sub(r'[\s\-+()]', '', phone)
+    return len(cleaned) >= 10 and cleaned.isdigit()
 
 def validate_email(email: str) -> bool:
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -41,9 +42,9 @@ def format_request_text(request_data: dict) -> str:
 📞 <b>Телефон:</b> {request_data.get('contact_phone', 'Не указан')}
 🏢 <b>Местоположение:</b> {request_data.get('location', 'Не указано')}
 
-📂 <b>Категория:</b> {categories[request_data['category']]}
-🚨 <b>Приоритет:</b> {priorities[request_data['priority']]}
-📊 <b>Статус:</b> {statuses[request_data['status']]}
+📂 <b>Категория:</b> {categories.get(request_data['category'], request_data['category'])}
+🚨 <b>Приоритет:</b> {priorities.get(request_data['priority'], request_data['priority'])}
+📊 <b>Статус:</b> {statuses.get(request_data['status'], request_data['status'])}
 
 📝 <b>Тема:</b> {request_data['title']}
 📄 <b>Описание:</b>
@@ -56,6 +57,12 @@ def format_request_text(request_data: dict) -> str:
     if request_data.get('solution'):
         text += f"\n💡 <b>Решение:</b>\n{request_data['solution']}"
     
-    text += f"\n⏰ <b>Создана:</b> {request_data['created_at'][:16].replace('T', ' ')}"
+    created_at = request_data['created_at']
+    if isinstance(created_at, str):
+        created_at = created_at[:16].replace('T', ' ')
+    else:
+        created_at = created_at.strftime('%d.%m.%Y %H:%M')
+    
+    text += f"\n⏰ <b>Создана:</b> {created_at}"
     
     return text
