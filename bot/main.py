@@ -10,7 +10,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Глобальные переменные для доступа из обработчиков
+ADMIN_IDS = []
+db = None
+
+def is_admin(user_id: int, admin_ids: list) -> bool:
+    """Проверка прав администратора с логированием"""
+    is_admin_user = user_id in admin_ids
+    print(f"🔐 Admin check: User {user_id} -> {is_admin_user}")
+    return is_admin_user
+
+def load_config():
+    """Загрузка и проверка конфигурации"""
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '')
+    DB_URL = os.getenv('DATABASE_URL', 'sqlite:///it_requests.db')
+    
+    # Парсинг ADMIN_IDS
+    ADMIN_IDS = []
+    if ADMIN_IDS_STR:
+        try:
+            ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
+            print(f"✅ Parsed ADMIN_IDS: {ADMIN_IDS}")
+        except ValueError as e:
+            print(f"❌ Error parsing ADMIN_IDS: {e}")
+            ADMIN_IDS = []
+    
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN not set in .env file")
+    
+    return BOT_TOKEN, ADMIN_IDS, DB_URL
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для отладки"""
+    user = update.effective_user
+    debug_text = f"""
+🔍 ДЕБАГ ИНФОРМАЦИЯ:
+
+👤 Ваш ID: {user.id}
+👤 Ваше имя: {user.full_name}
+🔐 Админ: {is_admin(user.id, ADMIN_IDS)}
+📋 Admin IDs: {ADMIN_IDS}
+"""
+    await update.message.reply_text(debug_text)
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена текущей операции"""
+    await update.message.reply_text(
+        "Операция отменена.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")
+        ]])
+    )
+    return ConversationHandler.END
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик необработанных исключений"""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    # Отправляем сообщение пользователю
+    if update and update.effective_user:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="❌ Произошла непредвиденная ошибка. Попробуйте позже."
+            )
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
+
 def main():
+    global ADMIN_IDS, db
+    
     try:
         from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
         from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, ContextTypes
@@ -18,23 +91,17 @@ def main():
         logger.error(f"Import error: {e}")
         return
 
-    # Загружаем конфигурацию напрямую
-    from dotenv import load_dotenv
-    load_dotenv()
-    
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
-    DB_URL = os.getenv('DATABASE_URL', 'sqlite:///it_requests.db')
-    
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set")
-        print("❌ Error: BOT_TOKEN not found in .env file")
+    # Загружаем конфигурацию
+    try:
+        BOT_TOKEN, ADMIN_IDS, DB_URL = load_config()
+        print(f"🤖 Starting IT Support Bot...")
+        print(f"🔑 Token: {BOT_TOKEN[:10]}...")
+        print(f"👨‍💼 Admins: {ADMIN_IDS}")
+        print(f"💾 Database: {DB_URL}")
+    except Exception as e:
+        logger.error(f"Config error: {e}")
+        print(f"❌ Configuration error: {e}")
         return
-    
-    print(f"🤖 Starting IT Support Bot...")
-    print(f"🔑 Token: {BOT_TOKEN[:10]}...")
-    print(f"👨‍💼 Admins: {ADMIN_IDS}")
-    print(f"💾 Database: {DB_URL}")
     
     # Инициализация базы данных
     try:
@@ -59,9 +126,9 @@ def main():
             """Команда /start - главное меню"""
             user = update.effective_user
             
-            # Логируем информацию о пользователе
-            is_admin = user.id in ADMIN_IDS
-            print(f"👤 User: {user.id} ({user.full_name}), Admin: {is_admin}")
+            # Детальная проверка администратора
+            is_admin_user = is_admin(user.id, ADMIN_IDS)
+            print(f"👤 User: {user.id} ({user.full_name}), Admin: {is_admin_user}")
             
             welcome_text = f"""👋 Добро пожаловать, {user.first_name}!
 
@@ -77,9 +144,11 @@ def main():
             ]
             
             # Добавляем кнопку админ-панели только для администраторов
-            if is_admin:
+            if is_admin_user:
                 keyboard.append([InlineKeyboardButton("👨‍💼 Админ панель", callback_data="admin_panel")])
-                print(f"✅ Admin panel button added for user {user.id}")
+                print(f"✅ Admin panel button ADDED for user {user.id}")
+            else:
+                print(f"❌ Admin panel button NOT added for user {user.id}")
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -116,12 +185,14 @@ def main():
             await query.answer()
             
             user_id = query.from_user.id
-            if user_id not in ADMIN_IDS:
+            print(f"🛠️ Admin panel requested by user {user_id}")
+            
+            if not is_admin(user_id, ADMIN_IDS):
                 await query.answer("❌ У вас нет доступа к админ-панели", show_alert=True)
-                print(f"❌ Access denied for user {user_id}")
+                print(f"❌ Access DENIED for user {user_id}")
                 return
             
-            print(f"✅ Admin panel accessed by user {user_id}")
+            print(f"✅ Access GRANTED for user {user_id}")
             
             # Получаем статистику
             session = db.get_session()
@@ -162,7 +233,7 @@ def main():
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in ADMIN_IDS:
+            if not is_admin(query.from_user.id, ADMIN_IDS):
                 await query.answer("❌ Нет доступа", show_alert=True)
                 return
             
@@ -209,7 +280,7 @@ def main():
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in ADMIN_IDS:
+            if not is_admin(query.from_user.id, ADMIN_IDS):
                 await query.answer("❌ Нет доступа", show_alert=True)
                 return
             
@@ -277,7 +348,7 @@ def main():
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in ADMIN_IDS:
+            if not is_admin(query.from_user.id, ADMIN_IDS):
                 await query.answer("❌ Нет доступа", show_alert=True)
                 return
             
@@ -310,7 +381,7 @@ def main():
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in ADMIN_IDS:
+            if not is_admin(query.from_user.id, ADMIN_IDS):
                 await query.answer("❌ Нет доступа", show_alert=True)
                 return
             
@@ -367,7 +438,7 @@ def main():
             query = update.callback_query
             await query.answer()
             
-            if query.from_user.id not in ADMIN_IDS:
+            if not is_admin(query.from_user.id, ADMIN_IDS):
                 await query.answer("❌ Нет доступа", show_alert=True)
                 return
             
@@ -511,9 +582,14 @@ def main():
         # Основные команды
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("debug", debug_command))
+        application.add_handler(CommandHandler("cancel", cancel))
         
         # Обработчик кнопок
         application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Обработчик ошибок
+        application.add_error_handler(error_handler)
         
         print("✅ Bot initialized successfully")
         print("🔄 Starting polling...")
