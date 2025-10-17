@@ -7,7 +7,7 @@ load_dotenv()
 @dataclass
 class BotConfig:
     token: str = os.getenv('BOT_TOKEN')
-    admin_ids: list = os.getenv('ADMIN_IDS', '').split(',')
+    admin_ids: list = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
     db_url: str = os.getenv('DATABASE_URL', 'sqlite:///it_requests.db')
 
 @dataclass
