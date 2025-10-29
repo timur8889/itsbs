@@ -18,7 +18,7 @@ from telegram.ext import (
     Updater,
     CommandHandler,
     MessageHandler,
-    Filters,
+    filters,
     ConversationHandler,
     CallbackContext,
     CallbackQueryHandler,
@@ -2556,36 +2556,38 @@ def main() -> None:
         return
     
     try:
-        updater = Updater(Config.BOT_TOKEN)
-        dispatcher = updater.dispatcher
-
+        # Используем Application вместо Updater для новой версии
+        from telegram.ext import Application
+        
+        application = Application.builder().token(Config.BOT_TOKEN).build()
+        
         # Обработчик создания заявки
         conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(Filters.regex('^(🎯 Создать заявку)$'), start_request_creation),
+                MessageHandler(filters.Regex('^(🎯 Создать заявку)$'), start_request_creation),
             ],
             states={
-                NAME: [MessageHandler(Filters.text & ~Filters.command, name)],
-                PHONE: [MessageHandler(Filters.text & ~Filters.command, phone)],
-                DEPARTMENT: [MessageHandler(Filters.text & ~Filters.command, department)],
-                SYSTEM_TYPE: [MessageHandler(Filters.text & ~Filters.command, system_type)],
-                PLOT: [MessageHandler(Filters.text & ~Filters.command, plot)],
-                OTHER_PLOT: [MessageHandler(Filters.text & ~Filters.command, other_plot)],
-                PROBLEM: [MessageHandler(Filters.text & ~Filters.command, problem)],
-                URGENCY: [MessageHandler(Filters.text & ~Filters.command, urgency)],
+                NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+                PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+                DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, department)],
+                SYSTEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, system_type)],
+                PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plot)],
+                OTHER_PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, other_plot)],
+                PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, problem)],
+                URGENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, urgency)],
                 PHOTO: [
-                    MessageHandler(Filters.text & ~Filters.command, photo),
-                    MessageHandler(Filters.photo, photo)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, photo),
+                    MessageHandler(filters.PHOTO, photo)
                 ],
-                EDIT_CHOICE: [MessageHandler(Filters.text & ~Filters.command, handle_edit_choice)],
+                EDIT_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_choice)],
                 EDIT_FIELD: [
-                    MessageHandler(Filters.text & ~Filters.command, handle_edit_field),
-                    MessageHandler(Filters.photo, handle_edit_field)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_field),
+                    MessageHandler(filters.PHOTO, handle_edit_field)
                 ],
             },
             fallbacks=[
                 CommandHandler('cancel', cancel_request),
-                MessageHandler(Filters.regex('^(🔙 Главное меню|🔙 Отменить)$'), cancel_request),
+                MessageHandler(filters.Regex('^(🔙 Главное меню|🔙 Отменить)$'), cancel_request),
             ],
             allow_reentry=True
         )
@@ -2593,20 +2595,20 @@ def main() -> None:
         # Обработчик редактирования заявки
         edit_conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(Filters.regex('^(✏️ Редактировать заявку)$'), start_edit_request),
+                MessageHandler(filters.Regex('^(✏️ Редактировать заявку)$'), start_edit_request),
             ],
             states={
-                SELECT_REQUEST: [MessageHandler(Filters.text & ~Filters.command, select_request_for_edit)],
-                EDIT_CHOICE: [MessageHandler(Filters.text & ~Filters.command, handle_edit_choice)],
+                SELECT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_request_for_edit)],
+                EDIT_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_choice)],
                 EDIT_FIELD: [
-                    MessageHandler(Filters.text & ~Filters.command, handle_edit_field),
-                    MessageHandler(Filters.photo, handle_edit_field)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_field),
+                    MessageHandler(filters.PHOTO, handle_edit_field)
                 ],
-                OTHER_PLOT: [MessageHandler(Filters.text & ~Filters.command, other_plot_edit)],
+                OTHER_PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, other_plot_edit)],
             },
             fallbacks=[
                 CommandHandler('cancel', cancel_edit),
-                MessageHandler(Filters.regex('^(🔙 Главное меню)$'), cancel_edit),
+                MessageHandler(filters.Regex('^(🔙 Главное меню)$'), cancel_edit),
             ],
             allow_reentry=True
         )
@@ -2614,68 +2616,68 @@ def main() -> None:
         # Обработчик массовой рассылки
         broadcast_conv_handler = ConversationHandler(
             entry_points=[
-                MessageHandler(Filters.regex('^(📢 Массовая рассылка)$'), start_broadcast),
+                MessageHandler(filters.Regex('^(📢 Массовая рассылка)$'), start_broadcast),
             ],
             states={
-                BROADCAST_AUDIENCE: [MessageHandler(Filters.text & ~Filters.command, handle_broadcast_audience)],
+                BROADCAST_AUDIENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_audience)],
                 BROADCAST_MESSAGE: [
-                    MessageHandler(Filters.text & ~Filters.command, handle_broadcast_message),
-                    MessageHandler(Filters.photo, handle_broadcast_message),
-                    MessageHandler(Filters.document, handle_broadcast_message)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_message),
+                    MessageHandler(filters.PHOTO, handle_broadcast_message),
+                    MessageHandler(filters.Document.ALL, handle_broadcast_message)
                 ],
-                BROADCAST_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, confirm_broadcast)],
+                BROADCAST_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_broadcast)],
             },
             fallbacks=[
                 CommandHandler('cancel', cancel_broadcast),
-                MessageHandler(Filters.regex('^(❌ Отменить|🔙 В админ-панель)$'), cancel_broadcast),
+                MessageHandler(filters.Regex('^(❌ Отменить|🔙 В админ-панель)$'), cancel_broadcast),
             ],
             allow_reentry=True
         )
 
         # Регистрируем обработчики
-        dispatcher.add_handler(CommandHandler('start', show_main_menu))
-        dispatcher.add_handler(CommandHandler('menu', show_main_menu))
-        dispatcher.add_handler(CommandHandler('help', show_help))
-        dispatcher.add_handler(CommandHandler('statistics', show_statistics))
+        application.add_handler(CommandHandler('start', show_main_menu))
+        application.add_handler(CommandHandler('menu', show_main_menu))
+        application.add_handler(CommandHandler('help', show_help))
+        application.add_handler(CommandHandler('statistics', show_statistics))
         
-        dispatcher.add_handler(conv_handler)
-        dispatcher.add_handler(edit_conv_handler)
-        dispatcher.add_handler(broadcast_conv_handler)
+        application.add_handler(conv_handler)
+        application.add_handler(edit_conv_handler)
+        application.add_handler(broadcast_conv_handler)
         
         # Обработчики для кнопок подтверждения и редактирования
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(🚀 Отправить заявку)$'), confirm_request))
-        dispatcher.add_handler(MessageHandler(Filters.regex('^(✏️ Исправить)$'), confirm_request))
+        application.add_handler(MessageHandler(filters.Regex('^(🚀 Отправить заявку)$'), confirm_request))
+        application.add_handler(MessageHandler(filters.Regex('^(✏️ Исправить)$'), confirm_request))
         
         # Обработчики главного меню
-        dispatcher.add_handler(MessageHandler(Filters.regex(
+        application.add_handler(MessageHandler(filters.Regex(
             '^(📂 Мои заявки|👑 Админ-панель|📊 Статистика|ℹ️ Помощь|👑 Супер-админ)$'), 
             handle_main_menu
         ))
         
         # Обработчики супер-админ панели
-        dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(📢 Массовая рассылка|👥 Управление админами|🏢 Все заявки|📈 Общая статистика)$'), 
+        application.add_handler(MessageHandler(
+            filters.Regex('^(📢 Массовая рассылка|👥 Управление админами|🏢 Все заявки|📈 Общая статистика)$'), 
             handle_super_admin_menu
         ))
         
         # Обработчики админ-панелей по отделам
-        dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(💻 IT админ-панель|🔧 Механика админ-панель|⚡ Электрика админ-панель)$'), 
+        application.add_handler(MessageHandler(
+            filters.Regex('^(💻 IT админ-панель|🔧 Механика админ-панель|⚡ Электрика админ-панель)$'), 
             handle_department_admin_panel
         ))
         
-        dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки IT|🔄 В работе IT|✅ Выполненные IT|📊 Статистика IT)$'), 
+        application.add_handler(MessageHandler(
+            filters.Regex('^(🆕 Новые заявки IT|🔄 В работе IT|✅ Выполненные IT|📊 Статистика IT)$'), 
             handle_it_admin_requests
         ))
         
-        dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки механики|🔄 В работе механики|✅ Выполненные механики|📊 Статистика механики)$'), 
+        application.add_handler(MessageHandler(
+            filters.Regex('^(🆕 Новые заявки механики|🔄 В работе механики|✅ Выполненные механики|📊 Статистика механики)$'), 
             handle_mechanics_admin_requests
         ))
         
-        dispatcher.add_handler(MessageHandler(
-            Filters.regex('^(🆕 Новые заявки электрики|🔄 В работе электрики|✅ Выполненные электрики|📊 Статистика электрики)$'), 
+        application.add_handler(MessageHandler(
+            filters.Regex('^(🆕 Новые заявки электрики|🔄 В работе электрики|✅ Выполненные электрики|📊 Статистика электрики)$'), 
             handle_electricity_admin_requests
         ))
 
@@ -2684,8 +2686,7 @@ def main() -> None:
         logger.info(f"👑 Супер-администраторы: {Config.SUPER_ADMIN_IDS}")
         logger.info(f"👥 Администраторы по отделам: {Config.ADMIN_CHAT_IDS}")
         
-        updater.start_polling()
-        updater.idle()
+        application.run_polling()
 
     except Exception as e:
         logger.error(f"❌ Ошибка запуска бота: {e}")
