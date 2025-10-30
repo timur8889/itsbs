@@ -249,7 +249,7 @@ edit_choice_keyboard = [
 ]
 
 # ◀️ Клавиатура назад
-edit_field_keyboard = [['◀️ Назад к редактированию']]
+back_keyboard = [['🔙 Назад']]
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -496,6 +496,52 @@ class Database:
             logger.error(f"Ошибка при обновлении статуса заявки #{request_id}: {e}")
             raise
 
+    def get_all_requests(self, limit: int = 100) -> List[Dict]:
+        """Получает все заявки"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM requests 
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                ''', (limit,))
+                columns = [column[0] for column in cursor.description]
+                requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return requests
+        except Exception as e:
+            logger.error(f"Ошибка при получении всех заявок: {e}")
+            return []
+
+    def get_statistics(self, days: int = 30) -> Dict:
+        """Получает статистику за указанный период"""
+        try:
+            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Общее количество заявок
+                cursor.execute('SELECT COUNT(*) FROM requests WHERE created_at >= ?', (start_date,))
+                total_requests = cursor.fetchone()[0]
+                
+                # Заявки по статусам
+                cursor.execute('SELECT status, COUNT(*) FROM requests WHERE created_at >= ? GROUP BY status', (start_date,))
+                status_stats = dict(cursor.fetchall())
+                
+                # Заявки по отделам
+                cursor.execute('SELECT department, COUNT(*) FROM requests WHERE created_at >= ? GROUP BY department', (start_date,))
+                department_stats = dict(cursor.fetchall())
+                
+                return {
+                    'total_requests': total_requests,
+                    'status_stats': status_stats,
+                    'department_stats': department_stats,
+                    'period_days': days
+                }
+        except Exception as e:
+            logger.error(f"Ошибка при получении статистики: {e}")
+            return {}
+
 # Инициализация базы данных
 db = Database(Config.DB_PATH)
 
@@ -506,8 +552,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.message.from_user
     logger.info(f"Пользователь {user.id} запустил бота")
     
+    # ДОБАВЛЕНА ПОДПИСЬ "завод Контакт"
     welcome_text = (
-        "👋 *Добро пожаловать в систему заявок!*\n\n"
+        "👋 *Добро пожаловать в систему заявок завода Контакт!*\n\n"
         "🛠️ *Мы поможем с:*\n"
         "• 💻 IT проблемами - компьютеры, программы, сети\n"
         "• 🔧 Механическими неисправностями - станки, оборудование\n"
@@ -535,13 +582,13 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if Config.is_super_admin(user_id):
         keyboard = super_admin_main_menu_keyboard
-        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР!*"
+        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР завода Контакт!*"
     elif Config.is_admin(user_id):
         keyboard = admin_main_menu_keyboard
-        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР!*"
+        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР завода Контакт!*"
     else:
         keyboard = user_main_menu_keyboard
-        welcome_text = "💼 *Добро пожаловать в сервис заявок!*"
+        welcome_text = "💼 *Добро пожаловать в сервис заявок завода Контакт!*"
     
     await update.message.reply_text(
         welcome_text,
@@ -552,7 +599,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает справку"""
     help_text = (
-        "💼 *Помощь по боту заявок*\n\n"
+        "💼 *Помощь по боту заявок завода Контакт*\n\n"
         "🎯 *Основные команды:*\n"
         "/start - начать работу\n"
         "/menu - главное меню\n" 
@@ -563,6 +610,160 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     await update.message.reply_text(
         help_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ==================== ФУНКЦИИ ДЛЯ КНОПОК ====================
+
+async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает заявки пользователя"""
+    user_id = update.message.from_user.id
+    requests = db.get_user_requests(user_id)
+    
+    if not requests:
+        await update.message.reply_text(
+            "📭 *У вас пока нет заявок*\n\n"
+            "Создайте первую заявку, нажав кнопку '🎯 Создать заявку'",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    for request in requests[:5]:  # Показываем последние 5 заявок
+        status_emoji = {
+            'new': '🆕',
+            'in_progress': '🔄', 
+            'completed': '✅'
+        }.get(request['status'], '❓')
+        
+        request_text = (
+            f"📋 *Заявка #{request['id']}*\n"
+            f"{status_emoji} *Статус:* {request['status']}\n"
+            f"🏢 *Отдел:* {request['department']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem'][:100]}...\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        await update.message.reply_text(
+            request_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def show_all_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает все заявки (для супер-админа)"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    requests = db.get_all_requests(limit=10)
+    
+    if not requests:
+        await update.message.reply_text("📭 Заявок пока нет")
+        return
+    
+    for request in requests:
+        status_emoji = {
+            'new': '🆕',
+            'in_progress': '🔄', 
+            'completed': '✅'
+        }.get(request['status'], '❓')
+        
+        request_text = (
+            f"📋 *Заявка #{request['id']}*\n"
+            f"👤 *Пользователь:* @{request['username'] or 'N/A'}\n"
+            f"{status_emoji} *Статус:* {request['status']}\n"
+            f"🏢 *Отдел:* {request['department']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem'][:100]}...\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        await update.message.reply_text(
+            request_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def show_general_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает общую статистику"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    stats = db.get_statistics(days=7)
+    
+    if not stats:
+        await update.message.reply_text("📊 Статистика временно недоступна")
+        return
+    
+    stats_text = (
+        f"📊 *ОБЩАЯ СТАТИСТИКА за {stats['period_days']} дней*\n\n"
+        f"📈 *Всего заявок:* {stats['total_requests']}\n\n"
+        f"📋 *По статусам:*\n"
+    )
+    
+    for status, count in stats['status_stats'].items():
+        status_emoji = {
+            'new': '🆕',
+            'in_progress': '🔄',
+            'completed': '✅'
+        }.get(status, '❓')
+        stats_text += f"{status_emoji} {status}: {count}\n"
+    
+    stats_text += f"\n🏢 *По отделам:*\n"
+    for department, count in stats['department_stats'].items():
+        stats_text += f"• {department}: {count}\n"
+    
+    await update.message.reply_text(
+        stats_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_admin_management(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает управление админами"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    admin_text = "👥 *Управление администраторами*\n\n"
+    
+    for department, admins in Config.ADMIN_CHAT_IDS.items():
+        admin_text += f"*{department}:*\n"
+        for admin_id in admins:
+            admin_text += f"• ID: {admin_id}\n"
+        admin_text += "\n"
+    
+    admin_text += "👑 *Супер-администраторы:*\n"
+    for admin_id in Config.SUPER_ADMIN_IDS:
+        admin_text += f"• ID: {admin_id}\n"
+    
+    await update.message.reply_text(
+        admin_text,
+        reply_markup=ReplyKeyboardMarkup(admin_management_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Начинает процесс массовой рассылки"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой функции.")
+        return
+    
+    await update.message.reply_text(
+        "📢 *Массовая рассылка*\n\n"
+        "Выберите аудиторию для рассылки:",
+        reply_markup=ReplyKeyboardMarkup(broadcast_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -581,16 +782,21 @@ async def start_request_creation(update: Update, context: ContextTypes.DEFAULT_T
         'last_name': user.last_name
     })
     
+    # ДОБАВЛЕНА КНОПКА НАЗАД
     await update.message.reply_text(
         "🎯 *Создание новой заявки*\n\n"
         "📝 *Шаг 1 из 8*\n"
         "👤 Для начала укажите ваше *имя и фамилию*:",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
     return NAME
 
 async def name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ДОБАВЛЕНА ОБРАБОТКА КНОПКИ НАЗАД
+    if update.message.text == '🔙 Назад':
+        return await cancel_request(update, context)
+    
     name_text = update.message.text.strip()
     
     if not Validators.validate_name(name_text):
@@ -598,7 +804,7 @@ async def name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "❌ *Неверный формат имени!*\n\n"
             "👤 Имя должно содержать только буквы и быть от 2 до 50 символов.\n"
             "Пожалуйста, введите ваше имя еще раз:",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
         return NAME
@@ -611,12 +817,20 @@ async def name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "• +7 999 123-45-67\n"
         "• 8 999 123-45-67\n"
         "• 79991234567",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
     return PHONE
 
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ДОБАВЛЕНА ОБРАБОТКА КНОПКИ НАЗАД
+    if update.message.text == '🔙 Назад':
+        await update.message.reply_text(
+            "👤 Введите ваше имя и фамилию:",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True)
+        )
+        return NAME
+    
     phone_text = update.message.text.strip()
     
     if not Validators.validate_phone(phone_text):
@@ -627,7 +841,7 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "• 8 999 123-45-67\n"
             "• 79991234567\n\n"
             "Попробуйте еще раз:",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
         return PHONE
@@ -646,7 +860,7 @@ async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def department(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text == '🔙 Назад в меню':
-        return await show_main_menu(update, context)
+        return await cancel_request(update, context)
     
     valid_departments = ['💻 IT отдел', '🔧 Механика', '⚡ Электрика']
     if update.message.text not in valid_departments:
@@ -749,7 +963,7 @@ async def plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "• Отдел кадров\n"
             "• Производственный цех №1\n"
             "• Склад готовой продукции",
-            reply_markup=ReplyKeyboardMarkup([['🔙 Назад']], resize_keyboard=True),
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
         return OTHER_PLOT
@@ -763,7 +977,7 @@ async def plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "• 'Станок ЧПУ издает нехарактерный шум при работе'\n"
         "• 'На участке мигает свет, периодически пропадает напряжение'\n\n"
         "⚠️ *Требования:* от 10 до 1000 символов",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
     return PROBLEM
@@ -786,19 +1000,27 @@ async def other_plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "• 'Станок ЧПУ издает нехарактерный шум при работе'\n"
         "• 'На участке мигает свет, периодически пропадает напряжение'\n\n"
         "⚠️ *Требования:* от 10 до 1000 символов",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
     return PROBLEM
 
 async def problem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ДОБАВЛЕНА ОБРАБОТКА КНОПКИ НАЗАД
+    if update.message.text == '🔙 Назад':
+        await update.message.reply_text(
+            "📍 *Выберите ваш участок или отдел:*",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+        )
+        return PLOT
+    
     problem_text = update.message.text.strip()
     
     if not Validators.validate_problem(problem_text):
         await update.message.reply_text(
             "❌ *Описание проблемы слишком короткое или длинное!*\n\n"
             "📝 Пожалуйста, опишите проблему подробнее (от 10 до 1000 символов):",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
         return PROBLEM
@@ -816,7 +1038,7 @@ async def urgency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.text == '🔙 Назад':
         await update.message.reply_text(
             "📖 *Опишите проблему подробно:*",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True)
         )
         return PROBLEM
     
@@ -851,7 +1073,7 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(
             "📸 *Отправьте фото или скриншот:*\n\n"
             "📎 Можно отправить несколько фото по очереди",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
             parse_mode=ParseMode.MARKDOWN
         )
         return PHOTO
@@ -1080,6 +1302,16 @@ async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.clear()
     return ConversationHandler.END
 
+async def edit_request_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Позволяет выбрать поле для редактирования"""
+    await update.message.reply_text(
+        "✏️ *Редактирование заявки*\n\n"
+        "Выберите поле, которое хотите изменить:",
+        reply_markup=ReplyKeyboardMarkup(edit_choice_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return EDIT_CHOICE
+
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1087,22 +1319,40 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text
     user_id = update.message.from_user.id
     
+    # Обработка основных кнопок меню
     if text == '🎯 Создать заявку':
         await start_request_creation(update, context)
     elif text == '📂 Мои заявки':
         await show_my_requests(update, context)
     elif text == '✏️ Редактировать заявку':
-        await update.message.reply_text("Функция редактирования будет добавлена позже")
+        await update.message.reply_text(
+            "✏️ *Редактирование заявок*\n\n"
+            "Для редактирования заявки создайте новую или обратитесь к администратору.",
+            parse_mode=ParseMode.MARKDOWN
+        )
     elif text == 'ℹ️ Помощь':
         await show_help(update, context)
     elif text == '👑 Админ-панель':
         await show_admin_panel(update, context)
     elif text == '📊 Статистика':
-        await show_statistics(update, context)
+        await show_statistics_menu(update, context)
     elif text == '👑 Супер-админ':
         await show_super_admin_panel(update, context)
     elif text == '🔙 Главное меню':
         await show_main_menu(update, context)
+    
+    # Обработка кнопок супер-админ панели
+    elif text == '📢 Массовая рассылка':
+        await start_broadcast(update, context)
+    elif text == '👥 Управление админами':
+        await show_admin_management(update, context)
+    elif text == '🏢 Все заявки':
+        await show_all_requests(update, context)
+    elif text == '📈 Общая статистика':
+        await show_general_statistics(update, context)
+    elif text == '🔙 В админ-панель':
+        await show_super_admin_panel(update, context)
+    
     else:
         await update.message.reply_text(
             "Используйте кнопки меню для навигации",
@@ -1114,25 +1364,6 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         )
 
-# ==================== БАЗОВЫЕ ФУНКЦИИ ====================
-
-async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает заявки пользователя"""
-    user_id = update.message.from_user.id
-    
-    # Простая заглушка для тестирования
-    await update.message.reply_text(
-        "📋 *Функция просмотра заявок в разработке*\n\n"
-        "Скоро здесь будет отображаться история ваших заявок",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(
-            super_admin_main_menu_keyboard if Config.is_super_admin(user_id) else
-            admin_main_menu_keyboard if Config.is_admin(user_id) else
-            user_main_menu_keyboard, 
-            resize_keyboard=True
-        )
-    )
-
 async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает админ-панель"""
     user_id = update.message.from_user.id
@@ -1141,16 +1372,16 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("❌ У вас нет доступа к админ-панели.")
         return
     
-    await update.message.reply_text(
-        "👑 *АДМИН-ПАНЕЛЬ*\n\n"
-        "Функции администрирования будут добавлены позже",
-        reply_markup=ReplyKeyboardMarkup([
-            ['🆕 Новые заявки', '🔄 В работе'],
-            ['✅ Выполненные', '📊 Статистика'],
-            ['🔙 Главное меню']
-        ], resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
+    # Если пользователь админ, но не супер-админ
+    if Config.is_admin(user_id) and not Config.is_super_admin(user_id):
+        await update.message.reply_text(
+            "👑 *АДМИН-ПАНЕЛЬ*\n\n"
+            "Выберите отдел для управления:",
+            reply_markup=ReplyKeyboardMarkup(admin_department_select_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await show_super_admin_panel(update, context)
 
 async def show_super_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает панель супер-администратора"""
@@ -1161,31 +1392,50 @@ async def show_super_admin_panel(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     await update.message.reply_text(
-        "👑 *ПАНЕЛЬ СУПЕР-АДМИНИСТРАТОРА*\n\n"
-        "Расширенные функции управления будут добавлены позже",
+        "👑 *ПАНЕЛЬ СУПЕР-АДМИНИСТРАТОРА завода Контакт*\n\n"
+        "Доступные функции:",
         reply_markup=ReplyKeyboardMarkup(super_admin_panel_keyboard, resize_keyboard=True),
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает статистику"""
+async def show_statistics_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает меню статистики"""
     user_id = update.message.from_user.id
     
-    stats_text = (
-        "📊 *СТАТИСТИКА СИСТЕМЫ*\n\n"
-        "Статистика будет отображаться здесь после добавления функционала"
-    )
-    
-    await update.message.reply_text(
-        stats_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardMarkup(
-            super_admin_main_menu_keyboard if Config.is_super_admin(user_id) else
-            admin_main_menu_keyboard if Config.is_admin(user_id) else
-            user_main_menu_keyboard, 
-            resize_keyboard=True
-        )
-    )
+    if Config.is_super_admin(user_id):
+        await show_general_statistics(update, context)
+    else:
+        stats = db.get_statistics(days=7)
+        
+        if stats:
+            stats_text = (
+                f"📊 *ВАША СТАТИСТИКА за 7 дней*\n\n"
+                f"📈 *Всего заявок:* {stats['total_requests']}\n\n"
+                f"📋 *Статусы ваших заявок:*\n"
+            )
+            
+            for status, count in stats['status_stats'].items():
+                status_emoji = {
+                    'new': '🆕',
+                    'in_progress': '🔄',
+                    'completed': '✅'
+                }.get(status, '❓')
+                stats_text += f"{status_emoji} {status}: {count}\n"
+            
+            await update.message.reply_text(
+                stats_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                "📊 *Статистика*\n\n"
+                "У вас пока нет заявок для отображения статистики.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает статистику (для обратной совместимости)"""
+    await show_statistics_menu(update, context)
 
 # ==================== ЗАПУСК БОТА ====================
 
@@ -1239,7 +1489,7 @@ def main() -> None:
         # Обработчик текстовых сообщений для меню
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
         
-        logger.info("🤖 Бот заявок запущен с системой раздельных админ-панелей!")
+        logger.info("🤖 Бот заявок завода Контакт запущен!")
         logger.info(f"👑 Супер-администраторы: {Config.SUPER_ADMIN_IDS}")
         logger.info(f"👥 Администраторы по отделам: {Config.ADMIN_CHAT_IDS}")
         
