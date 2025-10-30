@@ -6,8 +6,6 @@ import re
 import time
 import asyncio
 import shutil
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from io import BytesIO
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple, Set, Any
@@ -92,10 +90,6 @@ class Config:
         '💻 IT отдел': [5024165375]
     }
     
-    # Google Sheets настройки
-    GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
-    GOOGLE_SHEET_NAME = os.getenv('GOOGLE_SHEET_NAME', 'IT Заявки Завод Контакт')
-    
     DB_PATH = "requests.db"
     
     # Новые настройки
@@ -104,6 +98,12 @@ class Config:
     AUTO_BACKUP_HOURS = 24
     NOTIFICATION_HOURS_START = 9
     NOTIFICATION_HOURS_END = 22
+    
+    # Настройки завода
+    COMPANY_NAME = "Завод Контакт"
+    IT_DEPARTMENT_NAME = "IT отдел"
+    SUPPORT_PHONE = "+7 (XXX) XXX-XX-XX"
+    SUPPORT_EMAIL = "it@zavod-kontakt.ru"
     
     @staticmethod
     def is_admin(user_id: int) -> bool:
@@ -121,109 +121,7 @@ class Config:
             if not getattr(Config, var):
                 raise ValueError(f"Не задана обязательная переменная: {var}")
 
-# ==================== GOOGLE SHEETS ИНТЕГРАЦИЯ ====================
-
-class GoogleSheetsManager:
-    """📊 Менеджер для работы с Google Sheets"""
-    
-    def __init__(self):
-        self.credentials = None
-        self.client = None
-        self.sheet = None
-        self.setup_sheets()
-    
-    def setup_sheets(self):
-        """🔧 Настройка подключения к Google Sheets"""
-        try:
-            if not Config.GOOGLE_SHEETS_CREDENTIALS:
-                logger.warning("❌ Google Sheets credentials не найдены")
-                return
-            
-            # Парсим JSON credentials из переменной окружения
-            creds_dict = json.loads(Config.GOOGLE_SHEETS_CREDENTIALS)
-            
-            # Настраиваем доступ
-            scope = ['https://spreadsheets.google.com/feeds', 
-                    'https://www.googleapis.com/auth/drive']
-            
-            credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            self.client = gspread.authorize(credentials)
-            
-            # Открываем таблицу
-            self.sheet = self.client.open(Config.GOOGLE_SHEET_NAME).sheet1
-            
-            # Создаем заголовки если их нет
-            headers = ['ID', 'Дата создания', 'Пользователь', 'Телефон', 'Проблема', 
-                      'Статус', 'Исполнитель', 'Дата выполнения', 'Комментарий', 'Оценка']
-            
-            if not self.sheet.get('A1:J1'):
-                self.sheet.append_row(headers)
-            
-            logger.info("✅ Google Sheets подключен успешно")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка настройки Google Sheets: {e}")
-    
-    def add_request_to_sheet(self, request_data: Dict):
-        """📝 Добавляет заявку в Google Sheets"""
-        try:
-            if not self.sheet:
-                logger.warning("Google Sheets не настроен")
-                return
-            
-            row_data = [
-                request_data['id'],
-                request_data['created_at'],
-                request_data['username'],
-                request_data['phone'],
-                request_data['problem'],
-                request_data['status'],
-                request_data.get('assigned_admin', ''),
-                request_data.get('completed_at', ''),
-                request_data.get('admin_comment', ''),
-                request_data.get('rating', '')
-            ]
-            
-            self.sheet.append_row(row_data)
-            logger.info(f"✅ Заявка #{request_data['id']} добавлена в Google Sheets")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка добавления в Google Sheets: {e}")
-    
-    def update_request_in_sheet(self, request_data: Dict):
-        """🔄 Обновляет заявку в Google Sheets"""
-        try:
-            if not self.sheet:
-                return
-            
-            # Ищем строку с ID заявки
-            cell = self.sheet.find(str(request_data['id']))
-            if cell:
-                row = cell.row
-                
-                # Обновляем данные
-                update_data = [
-                    request_data['id'],
-                    request_data['created_at'],
-                    request_data['username'],
-                    request_data['phone'],
-                    request_data['problem'],
-                    request_data['status'],
-                    request_data.get('assigned_admin', ''),
-                    request_data.get('completed_at', ''),
-                    request_data.get('admin_comment', ''),
-                    request_data.get('rating', '')
-                ]
-                
-                for i, value in enumerate(update_data, 1):
-                    self.sheet.update_cell(row, i, value)
-                
-                logger.info(f"✅ Заявка #{request_data['id']} обновлена в Google Sheets")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обновления в Google Sheets: {e}")
-
-# ==================== БАЗА ДАННЫХ ====================
+# ==================== УЛУЧШЕННАЯ БАЗА ДАННЫХ ====================
 
 class EnhancedDatabase:
     """🗃️ Улучшенный класс для работы с базой данных"""
@@ -253,7 +151,9 @@ class EnhancedDatabase:
                     assigned_at TEXT,
                     assigned_admin TEXT,
                     completed_at TEXT,
-                    admin_comment TEXT
+                    admin_comment TEXT,
+                    user_rating INTEGER DEFAULT 0,
+                    user_feedback TEXT
                 )
             ''')
             
@@ -264,10 +164,28 @@ class EnhancedDatabase:
                     request_id INTEGER,
                     file_id TEXT,
                     file_type TEXT,
+                    file_name TEXT,
                     created_at TEXT,
                     FOREIGN KEY (request_id) REFERENCES requests (id)
                 )
             ''')
+            
+            # Таблица статистики
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS statistics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT,
+                    total_requests INTEGER DEFAULT 0,
+                    completed_requests INTEGER DEFAULT 0,
+                    avg_completion_time REAL DEFAULT 0,
+                    created_at TEXT
+                )
+            ''')
+            
+            # Индексы для производительности
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id)')
             
             conn.commit()
     
@@ -285,14 +203,14 @@ class EnhancedDatabase:
             conn.commit()
             return request_id
     
-    def add_media_to_request(self, request_id: int, file_id: str, file_type: str):
+    def add_media_to_request(self, request_id: int, file_id: str, file_type: str, file_name: str = None):
         """📎 Добавляет медиа файл к заявке"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO request_media (request_id, file_id, file_type, created_at)
-                VALUES (?, ?, ?, ?)
-            ''', (request_id, file_id, file_type, datetime.now().isoformat()))
+                INSERT INTO request_media (request_id, file_id, file_type, file_name, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (request_id, file_id, file_type, file_name, datetime.now().isoformat()))
             conn.commit()
     
     def get_request_media(self, request_id: int) -> List[Dict]:
@@ -318,7 +236,7 @@ class EnhancedDatabase:
             ''', (comment, request_id))
             conn.commit()
     
-    def get_requests(self, status: str = None, limit: int = 50) -> List[Dict]:
+    def get_requests(self, status: str = None, limit: int = 50, user_id: int = None) -> List[Dict]:
         """📋 Получает список заявок"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -328,6 +246,10 @@ class EnhancedDatabase:
             if status:
                 query += " AND status = ?"
                 params.append(status)
+            
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
             
             query += " ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
@@ -375,43 +297,88 @@ class EnhancedDatabase:
     
     def get_user_requests(self, user_id: int) -> List[Dict]:
         """📂 Получает заявки пользователя"""
+        return self.get_requests(user_id=user_id, limit=100)
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """📊 Получает статистику"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Общая статистика
+            cursor.execute('''
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new,
+                    SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+                FROM requests
+            ''')
+            stats = cursor.fetchone()
+            
+            # Статистика за сегодня
+            today = datetime.now().strftime('%Y-%m-%d')
+            cursor.execute('''
+                SELECT COUNT(*) FROM requests 
+                WHERE DATE(created_at) = ? AND status = 'completed'
+            ''', (today,))
+            completed_today = cursor.fetchone()[0]
+            
+            # Средняя оценка
+            cursor.execute('''
+                SELECT AVG(user_rating) FROM requests 
+                WHERE user_rating > 0
+            ''')
+            avg_rating = cursor.fetchone()[0] or 0
+            
+            return {
+                'total': stats[0],
+                'new': stats[1],
+                'in_progress': stats[2],
+                'completed': stats[3],
+                'completed_today': completed_today,
+                'avg_rating': round(avg_rating, 1),
+                'efficiency': round((stats[3] / stats[0] * 100), 1) if stats[0] > 0 else 0
+            }
+    
+    def add_user_feedback(self, request_id: int, rating: int, feedback: str = ""):
+        """⭐ Добавляет отзыв пользователя"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT * FROM requests 
-                WHERE user_id = ? 
-                ORDER BY created_at DESC
-            ''', (user_id,))
-            columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+                UPDATE requests 
+                SET user_rating = ?, user_feedback = ?
+                WHERE id = ?
+            ''', (rating, feedback, request_id))
+            conn.commit()
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
 # Инициализация базы данных
 db = EnhancedDatabase(Config.DB_PATH)
 
-# Инициализация Google Sheets
-sheets_manager = GoogleSheetsManager()
-
-# ==================== ОСНОВНЫЕ КОМАНДЫ БОТА ====================
+# ==================== УЛУЧШЕННЫЕ КОМАНДЫ БОТА ====================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """🚀 Обработчик команды /start"""
     user = update.message.from_user
     
     welcome_text = (
-        "🎉 *Рады видеть Вас!*\n\n"
-        "Вы подключились в IT отдел завода *Контакт*! 🤖\n\n"
-        "Будем рады Вам помочь с решением технических вопросов и проблем. "
-        "Наша команда готова оперативно реагировать на ваши заявки.\n\n"
-        "💡 *Что мы можем сделать:*\n"
-        "• 🖥️ Помощь с компьютерной техникой\n"
-        "🌐 Решение проблем с сетью и интернетом\n"
-        "🖨️ Настройка принтеров и оргтехники\n"
-        "📱 Поддержка программного обеспечения\n"
-        "🔧 Консультации по техническим вопросам\n\n"
-        "Выберите действие из меню ниже:"
+        f"🎉 *Рады видеть Вас!*\n\n"
+        f"Вы подключились в {Config.IT_DEPARTMENT_NAME} {Config.COMPANY_NAME}! 🤖\n\n"
+        f"*Будем рады Вам помочь с решением технических вопросов:*\n"
+        f"• 🖥️ Компьютерная техника и ПО\n"
+        f"• 🌐 Сеть и интернет\n"
+        f"• 🖨️ Принтеры и оргтехника\n"
+        f"• 📱 Мобильные устройства\n"
+        f"• 🔧 Технические консультации\n\n"
+        f"*Контакты отдела:*\n"
+        f"• 📞 {Config.SUPPORT_PHONE}\n"
+        f"• 📧 {Config.SUPPORT_EMAIL}\n\n"
+        f"Выберите действие из меню ниже:"
     )
+    
+    # Сохраняем информацию о пользователе
+    logger.info(f"👤 Новый пользователь: {user.full_name} (ID: {user.id})")
     
     await show_main_menu(update, context, welcome_text)
 
@@ -419,7 +386,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, wel
     """🏠 Показывает главное меню"""
     keyboard = [
         ["📝 Создать заявку", "📂 Мои заявки"],
-        ["🆘 Помощь"]
+        ["📊 Статистика", "🆘 Помощь"],
+        ["👨‍💼 Контакты отдела"]
     ]
     
     # Добавляем админские кнопки для администраторов
@@ -436,12 +404,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, wel
         )
     else:
         await update.message.reply_text(
-            "🎯 *Главное меню IT отдела завода Контакт*",
+            f"🎯 *Главное меню {Config.IT_DEPARTMENT_NAME}*",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
 
-# ==================== ПРОЦЕСС СОЗДАНИЯ ЗАЯВКИ ====================
+# ==================== УЛУЧШЕННЫЙ ПРОЦЕСС СОЗДАНИЯ ЗАЯВКИ ====================
 
 # Состояния для создания заявки
 REQUEST_PHONE, REQUEST_PROBLEM, REQUEST_MEDIA = range(3)
@@ -456,12 +424,13 @@ async def new_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         'media_files': []  # Список для хранения медиа файлов
     }
     
-    keyboard = [["🔙 Назад"]]
+    keyboard = [["🔙 Главное меню"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
         "📋 *Создание новой заявки*\n\n"
-        "📞 Пожалуйста, введите ваш номер телефона для связи:",
+        "📞 Пожалуйста, введите ваш номер телефона для связи:\n\n"
+        "💡 *Пример:* +7 (XXX) XXX-XX-XX",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -470,24 +439,32 @@ async def new_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def request_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """📞 Обрабатывает номер телефона"""
-    if update.message.text == "🔙 Назад":
+    if update.message.text == "🔙 Главное меню":
         await show_main_menu(update, context)
         return ConversationHandler.END
     
-    phone = update.message.text
+    phone = update.message.text.strip()
+    
+    # Простая валидация номера телефона
+    if len(phone) < 5:
+        await update.message.reply_text(
+            "❌ Номер телефона слишком короткий. Пожалуйста, введите корректный номер:"
+        )
+        return REQUEST_PHONE
+    
     context.user_data['request']['phone'] = phone
     
-    keyboard = [["🔙 Назад"]]
+    keyboard = [["🔙 Назад", "🔙 Главное меню"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "🔧 Опишите вашу проблему подробно:\n\n"
-        "💡 *Примеры:*\n"
-        "• 'Не включается компьютер'\n"
-        "• 'Не работает интернет'\n"
-        "• 'Не печатает принтер'\n"
-        "• 'Требуется установка программы'\n\n"
-        "Вы можете прикрепить фото или видео проблемы после описания.",
+        "🔧 *Опишите вашу проблему подробно:*\n\n"
+        "💡 *Примеры хороших описаний:*\n"
+        "• 'Не включается компьютер, при нажатии кнопки питания ничего не происходит'\n"
+        "• 'Не работает интернет на всех устройствах в кабинете 305'\n"
+        "• 'Принтер HP LaserJet печатает пустые листы'\n"
+        "• 'Требуется установка программы 1С на новый компьютер'\n\n"
+        "📎 *После описания вы сможете прикрепить фото или видео проблемы*",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -496,9 +473,14 @@ async def request_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """🔧 Обрабатывает описание проблемы"""
-    if update.message.text == "🔙 Назад":
+    text = update.message.text
+    
+    if text == "🔙 Главное меню":
+        await show_main_menu(update, context)
+        return ConversationHandler.END
+    elif text == "🔙 Назад":
         # Возвращаемся к вводу телефона
-        keyboard = [["🔙 Назад"]]
+        keyboard = [["🔙 Главное меню"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
         await update.message.reply_text(
@@ -508,18 +490,30 @@ async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return REQUEST_PHONE
     
-    problem = update.message.text
+    problem = text.strip()
+    
+    # Проверяем длину описания
+    if len(problem) < 10:
+        await update.message.reply_text(
+            "❌ Описание проблемы слишком короткое. Пожалуйста, опишите проблему более подробно:"
+        )
+        return REQUEST_PROBLEM
+    
     context.user_data['request']['problem'] = problem
     
     keyboard = [
         ["📎 Прикрепить фото/видео", "✅ Завершить без медиа"],
-        ["🔙 Назад"]
+        ["🔙 Назад", "🔙 Главное меню"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "📎 Хотите прикрепить фото или видео к заявке?\n\n"
-        "💡 *Это поможет нам быстрее понять и решить проблему*",
+        "📎 *Хотите прикрепить фото или видео к заявке?*\n\n"
+        "💡 *Это поможет нам быстрее понять и решить проблему*\n"
+        "• 📸 Фото проблемы\n"
+        "• 🎥 Видео с демонстрацией\n"
+        "• 📄 Скриншот ошибки\n\n"
+        "Выберите действие:",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -529,10 +523,14 @@ async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """📎 Обрабатывает медиа файлы"""
     message = update.message
-    
-    if message.text == "🔙 Назад":
+    text = message.text if message.text else ""
+
+    if text == "🔙 Главное меню":
+        await show_main_menu(update, context)
+        return ConversationHandler.END
+    elif text == "🔙 Назад":
         # Возвращаемся к описанию проблемы
-        keyboard = [["🔙 Назад"]]
+        keyboard = [["🔙 Назад", "🔙 Главное меню"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         
         await update.message.reply_text(
@@ -541,42 +539,63 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             parse_mode=ParseMode.MARKDOWN
         )
         return REQUEST_PROBLEM
-    
-    if message.text == "✅ Завершить без медиа":
+    elif text == "✅ Завершить без медиа":
         return await create_request_final(update, context)
+    
+    # Обработка медиа файлов
+    file_info = None
+    file_type = None
     
     if message.photo:
         # Берем самое большое фото
-        file_id = message.photo[-1].file_id
+        file_info = message.photo[-1]
         file_type = "photo"
+        file_name = f"photo_{file_info.file_id}.jpg"
     elif message.video:
-        file_id = message.video.file_id
+        file_info = message.video
         file_type = "video"
+        file_name = f"video_{file_info.file_id}.mp4"
     elif message.document:
-        file_id = message.document.file_id
+        file_info = message.document
         file_type = "document"
+        file_name = file_info.file_name or f"document_{file_info.file_id}"
     else:
-        await message.reply_text("❌ Пожалуйста, отправьте фото или видео.")
+        await message.reply_text(
+            "❌ Пожалуйста, отправьте фото, видео или документ, либо выберите действие из меню."
+        )
         return REQUEST_MEDIA
     
-    # Сохраняем информацию о файле
-    context.user_data['request']['media_files'].append({
-        'file_id': file_id,
-        'file_type': file_type
-    })
-    
-    keyboard = [
-        ["📎 Прикрепить еще", "✅ Завершить создание"],
-        ["🔙 Назад"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
-    await message.reply_text(
-        f"✅ { 'Фото' if file_type == 'photo' else 'Видео' } прикреплено!\n"
-        f"📎 Прикреплено файлов: {len(context.user_data['request']['media_files'])}",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    if file_info:
+        # Сохраняем информацию о файле
+        context.user_data['request']['media_files'].append({
+            'file_id': file_info.file_id,
+            'file_type': file_type,
+            'file_name': file_name
+        })
+        
+        media_count = len(context.user_data['request']['media_files'])
+        
+        keyboard = [
+            ["📎 Прикрепить еще", "✅ Завершить создание"],
+            ["🔙 Назад", "🔙 Главное меню"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        media_type_emoji = {
+            'photo': '📸',
+            'video': '🎥', 
+            'document': '📄'
+        }.get(file_type, '📎')
+        
+        await message.reply_text(
+            f"{media_type_emoji} *Файл успешно прикреплен!*\n\n"
+            f"📎 Прикреплено файлов: {media_count}\n"
+            f"💾 Тип: {file_type}\n"
+            f"📁 Имя: {file_name}\n\n"
+            f"Вы можете прикрепить еще файлы или завершить создание заявки.",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
     
     return REQUEST_MEDIA
 
@@ -598,28 +617,27 @@ async def create_request_final(update: Update, context: ContextTypes.DEFAULT_TYP
             db.add_media_to_request(
                 request_id, 
                 media_file['file_id'], 
-                media_file['file_type']
+                media_file['file_type'],
+                media_file.get('file_name')
             )
-        
-        # Получаем полные данные заявки для Google Sheets
-        full_request_data = db.get_request(request_id)
-        full_request_data['id'] = request_id
-        
-        # Добавляем в Google Sheets
-        sheets_manager.add_request_to_sheet(full_request_data)
         
         # Отправляем уведомление администраторам
         await notify_admins_new_request(context, request_id, request_data)
         
+        # Форматируем дату создания
+        created_time = datetime.now().strftime('%d.%m.%Y в %H:%M')
+        
         success_text = (
             f"🎉 *Заявка #{request_id} успешно создана!*\n\n"
-            f"🏢 *Отдел:* 💻 IT отдел\n"
-            f"📞 *Ваш телефон:* {request_data['phone']}\n"
+            f"🏢 *Отдел:* {Config.IT_DEPARTMENT_NAME}\n"
+            f"👤 *Ваше имя:* {request_data['username']}\n"
+            f"📞 *Телефон:* {request_data['phone']}\n"
             f"📎 *Медиа файлов:* {len(request_data.get('media_files', []))}\n\n"
-            f"🔧 *Проблема:* {request_data['problem']}\n\n"
-            f"⏰ *Заявка зарегистрирована:* {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-            f"📊 Вы можете отслеживать статус заявки в разделе \"📂 Мои заявки\"\n"
-            f"💬 Мы свяжемся с вами в ближайшее время!"
+            f"🔧 *Описание проблемы:*\n{request_data['problem']}\n\n"
+            f"⏰ *Создана:* {created_time}\n\n"
+            f"📊 *Статус:* 🆕 Новая\n\n"
+            f"💬 *Мы свяжемся с вами в ближайшее время!*\n"
+            f"📂 Отслеживать статус можно в разделе \"Мои заявки\""
         )
         
         await context.bot.send_message(
@@ -627,6 +645,9 @@ async def create_request_final(update: Update, context: ContextTypes.DEFAULT_TYP
             text=success_text,
             parse_mode=ParseMode.MARKDOWN
         )
+        
+        # Логируем создание заявки
+        logger.info(f"✅ Создана заявка #{request_id} от пользователя {request_data['username']}")
         
         # Очищаем данные
         context.user_data.clear()
@@ -637,7 +658,7 @@ async def create_request_final(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"❌ Ошибка создания заявки: {e}")
         await update.message.reply_text(
-            "❌ Произошла ошибка при создании заявки. Пожалуйста, попробуйте позже."
+            "❌ Произошла ошибка при создании заявки. Пожалуйста, попробуйте позже или обратитесь в отдел напрямую."
         )
         return ConversationHandler.END
 
@@ -645,10 +666,11 @@ async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, request_
     """👥 Уведомляет администраторов о новой заявке"""
     message = (
         f"🆕 *НОВАЯ ЗАЯВКА #{request_id}*\n\n"
-        f"👤 {request_data['username']} | 📞 {request_data['phone']}\n"
-        f"🔧 {request_data['problem'][:100]}...\n"
-        f"📎 Медиа файлов: {len(request_data.get('media_files', []))}\n"
-        f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        f"👤 *Пользователь:* {request_data['username']}\n"
+        f"📞 *Телефон:* {request_data['phone']}\n"
+        f"🔧 *Проблема:* {request_data['problem'][:200]}...\n"
+        f"📎 *Медиа файлов:* {len(request_data.get('media_files', []))}\n"
+        f"🕒 *Создана:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
     )
     
     # Отправляем уведомление всем администраторам IT отдела
@@ -676,13 +698,17 @@ async def notify_admins_new_request(context: ContextTypes.DEFAULT_TYPE, request_
 async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """❌ Отменяет создание заявки"""
     context.user_data.clear()
+    
+    keyboard = [["📝 Создать заявку", "🔙 Главное меню"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
     await update.message.reply_text(
         "❌ Создание заявки отменено.",
-        reply_markup=ReplyKeyboardMarkup([["📝 Создать заявку"]], resize_keyboard=True)
+        reply_markup=reply_markup
     )
     return ConversationHandler.END
 
-# ==================== ОБРАБОТЧИКИ КНОПОК АДМИНИСТРАТОРОВ ====================
+# ==================== УЛУЧШЕННЫЕ ОБРАБОТЧИКИ КНОПОК АДМИНИСТРАТОРОВ ====================
 
 async def handle_admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """👨‍💼 Обрабатывает нажатия кнопок администратора"""
@@ -707,6 +733,12 @@ async def handle_admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYP
     elif data.startswith('complete_'):
         request_id = int(data.split('_')[1])
         await complete_request_with_comment(update, context, request_id, user_id)
+    
+    elif data.startswith('feedback_'):
+        parts = data.split('_')
+        request_id = int(parts[1])
+        rating = int(parts[2])
+        await handle_user_feedback(update, context, request_id, rating)
 
 async def take_request_in_work(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, admin_id: int):
     """👨‍💼 Берет заявку в работу"""
@@ -726,18 +758,16 @@ async def take_request_in_work(update: Update, context: ContextTypes.DEFAULT_TYP
         admin_name = query.from_user.full_name
         db.update_request_status(request_id, 'in_progress', admin_name)
         
-        # Обновляем в Google Sheets
-        updated_request = db.get_request(request_id)
-        updated_request['id'] = request_id
-        sheets_manager.update_request_in_sheet(updated_request)
-        
         # Обновляем сообщение
-        message_text = query.message.text + f"\n\n✅ *ВЗЯТА В РАБОТУ*\n👨‍💼 Исполнитель: {admin_name}"
+        message_text = query.message.text + f"\n\n✅ *ВЗЯТА В РАБОТУ*\n👨‍💼 Исполнитель: {admin_name}\n🕒 Время: {datetime.now().strftime('%H:%M')}"
         
         # Обновляем клавиатуру
         keyboard = [
             [
                 InlineKeyboardButton("✅ Заявка выполнена", callback_data=f"complete_{request_id}"),
+            ],
+            [
+                InlineKeyboardButton("📋 Обновить информацию", callback_data=f"details_{request_id}")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -751,9 +781,16 @@ async def take_request_in_work(update: Update, context: ContextTypes.DEFAULT_TYP
         # Уведомляем пользователя
         await context.bot.send_message(
             chat_id=request['user_id'],
-            text=f"🔄 *Заявка #{request_id} взята в работу*\n\n👨‍💼 Исполнитель: {admin_name}",
+            text=(
+                f"🔄 *Заявка #{request_id} взята в работу*\n\n"
+                f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                f"🕒 *Время:* {datetime.now().strftime('%H:%M')}\n\n"
+                f"💬 *Специалист свяжется с вами для уточнения деталей*"
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
+        
+        logger.info(f"👨‍💼 Заявка #{request_id} взята в работу администратором {admin_name}")
         
     except Exception as e:
         logger.error(f"❌ Ошибка взятия заявки в работу: {e}")
@@ -771,7 +808,11 @@ async def complete_request_with_comment(update: Update, context: ContextTypes.DE
     
     await query.message.reply_text(
         f"💬 *Завершение заявки #{request_id}*\n\n"
-        f"Пожалуйста, введите комментарий к выполненной работе:",
+        f"Пожалуйста, введите комментарий к выполненной работе:\n\n"
+        f"💡 *Примеры комментариев:*\n"
+        f"• 'Переустановил драйвер принтера, проблема решена'\n"
+        f"• 'Заменил сетевой кабель, интернет работает'\n"
+        f"• 'Настроил ПО, пользователь проинструктирован'",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -785,9 +826,13 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.message.text == "🔙 Отмена":
         context.user_data.pop('completing_request', None)
         context.user_data.pop('completing_admin', None)
+        
+        keyboard = [["👨‍💼 Админ панель"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
         await update.message.reply_text(
             "❌ Завершение заявки отменено.",
-            reply_markup=ReplyKeyboardMarkup([["👨‍💼 Админ панель"]], resize_keyboard=True)
+            reply_markup=reply_markup
         )
         return
     
@@ -804,30 +849,43 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
             # Сохраняем комментарий
             db.update_admin_comment(request_id, comment)
             
-            # Обновляем в Google Sheets
-            updated_request = db.get_request(request_id)
-            updated_request['id'] = request_id
-            sheets_manager.update_request_in_sheet(updated_request)
-            
             # Отправляем уведомление пользователю
             request = db.get_request(request_id)
             if request:
+                user_message = (
+                    f"✅ *Заявка #{request_id} выполнена!*\n\n"
+                    f"👨‍💼 *Исполнитель:* {admin_name}\n"
+                    f"💬 *Комментарий:* {comment}\n\n"
+                    f"⭐ *Пожалуйста, оцените качество работы:*"
+                )
+                
+                # Создаем клавиатуру для оценки
+                rating_keyboard = []
+                for i in range(1, 6):
+                    rating_keyboard.append([
+                        InlineKeyboardButton(
+                            "★" * i + "☆" * (5 - i), 
+                            callback_data=f"feedback_{request_id}_{i}"
+                        )
+                    ])
+                reply_markup = InlineKeyboardMarkup(rating_keyboard)
+                
                 await context.bot.send_message(
                     chat_id=request['user_id'],
-                    text=(
-                        f"✅ *Заявка #{request_id} выполнена!*\n\n"
-                        f"👨‍💼 Исполнитель: {admin_name}\n"
-                        f"💬 Комментарий: {comment}\n\n"
-                        f"⭐ Спасибо, что воспользовались нашим сервисом!\n"
-                        f"🔄 Если проблема повторится, создайте новую заявку."
-                    ),
+                    text=user_message,
+                    reply_markup=reply_markup,
                     parse_mode=ParseMode.MARKDOWN
                 )
             
+            keyboard = [["👨‍💼 Админ панель"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
             await update.message.reply_text(
                 f"✅ Заявка #{request_id} завершена с комментарием!",
-                reply_markup=ReplyKeyboardMarkup([["👨‍💼 Админ панель"]], resize_keyboard=True)
+                reply_markup=reply_markup
             )
+            
+            logger.info(f"✅ Заявка #{request_id} завершена администратором {admin_name}")
             
             # Очищаем временные данные
             context.user_data.pop('completing_request', None)
@@ -836,6 +894,39 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"❌ Ошибка завершения заявки: {e}")
             await update.message.reply_text("❌ Ошибка при завершении заявки.")
+
+async def handle_user_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, rating: int):
+    """⭐ Обрабатывает оценку пользователя"""
+    query = update.callback_query
+    
+    try:
+        request = db.get_request(request_id)
+        if not request or request['user_id'] != query.from_user.id:
+            await query.answer("❌ Ошибка оценки!", show_alert=True)
+            return
+        
+        # Сохраняем оценку
+        db.add_user_feedback(request_id, rating)
+        
+        # Благодарим пользователя
+        thanks_message = (
+            f"⭐ *Спасибо за оценку!*\n\n"
+            f"📋 *Заявка #{request_id}*\n"
+            f"⭐ *Оценка:* {'★' * rating}{'☆' * (5 - rating)}\n\n"
+            f"💼 *Ваш отзыв помогает нам улучшать сервис!*\n"
+            f"🔄 Если возникнут новые проблемы - создавайте заявки!"
+        )
+        
+        await query.edit_message_text(
+            thanks_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        logger.info(f"⭐ Пользователь оценил заявку #{request_id} на {rating} звезд")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки оценки: {e}")
+        await query.answer("❌ Ошибка при сохранении оценки!", show_alert=True)
 
 async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int):
     """📋 Показывает детали заявки"""
@@ -850,23 +941,35 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
         # Получаем медиа файлы
         media_files = db.get_request_media(request_id)
         
+        # Форматируем даты
+        created_date = datetime.fromisoformat(request['created_at']).strftime('%d.%m.%Y в %H:%M')
+        
         details_text = (
             f"📋 *ДЕТАЛИ ЗАЯВКИ #{request_id}*\n\n"
             f"👤 *Пользователь:* {request['username']}\n"
             f"📞 *Телефон:* {request['phone']}\n"
             f"🔧 *Проблема:* {request['problem']}\n"
             f"📊 *Статус:* {request['status']}\n"
-            f"🕒 *Создана:* {request['created_at'][:16]}\n"
+            f"🕒 *Создана:* {created_date}\n"
         )
         
         if request['assigned_admin']:
             details_text += f"👨‍💼 *Исполнитель:* {request['assigned_admin']}\n"
+            if request['assigned_at']:
+                assigned_date = datetime.fromisoformat(request['assigned_at']).strftime('%d.%m.%Y в %H:%M')
+                details_text += f"⏰ *Взята в работу:* {assigned_date}\n"
         
         if request['admin_comment']:
             details_text += f"💬 *Комментарий:* {request['admin_comment']}\n"
         
-        if media_files:
-            details_text += f"📎 *Медиа файлов:* {len(media_files)}\n"
+        if request['completed_at']:
+            completed_date = datetime.fromisoformat(request['completed_at']).strftime('%d.%m.%Y в %H:%M')
+            details_text += f"✅ *Завершена:* {completed_date}\n"
+        
+        if request['user_rating'] > 0:
+            details_text += f"⭐ *Оценка пользователя:* {'★' * request['user_rating']}{'☆' * (5 - request['user_rating'])}\n"
+        
+        details_text += f"📎 *Медиа файлов:* {len(media_files)}\n"
         
         await query.message.reply_text(
             details_text,
@@ -876,26 +979,37 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
         # Отправляем медиа файлы если они есть
         for media in media_files:
             try:
+                caption = f"📎 Файл к заявке #{request_id}"
+                if media['file_name']:
+                    caption += f" ({media['file_name']})"
+                
                 if media['file_type'] == 'photo':
                     await context.bot.send_photo(
                         chat_id=query.message.chat_id,
                         photo=media['file_id'],
-                        caption=f"📎 Фото к заявке #{request_id}"
+                        caption=caption
                     )
                 elif media['file_type'] == 'video':
                     await context.bot.send_video(
                         chat_id=query.message.chat_id,
                         video=media['file_id'],
-                        caption=f"📎 Видео к заявке #{request_id}"
+                        caption=caption
+                    )
+                elif media['file_type'] == 'document':
+                    await context.bot.send_document(
+                        chat_id=query.message.chat_id,
+                        document=media['file_id'],
+                        caption=caption
                     )
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки медиа: {e}")
+                await query.message.reply_text(f"❌ Не удалось отправить файл: {str(e)}")
         
     except Exception as e:
         logger.error(f"❌ Ошибка показа деталей заявки: {e}")
         await query.answer("❌ Ошибка при загрузке деталей!", show_alert=True)
 
-# ==================== АДМИНСКИЕ КОМАНДЫ ====================
+# ==================== УЛУЧШЕННЫЕ АДМИНСКИЕ КОМАНДЫ ====================
 
 async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """👨‍💼 Показывает админскую панель"""
@@ -905,22 +1019,25 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     # Получаем статистику
-    requests = db.get_requests()
-    new_requests = len([r for r in requests if r['status'] == 'new'])
-    in_progress_requests = len([r for r in requests if r['status'] == 'in_progress'])
+    stats = db.get_statistics()
     
     admin_text = (
-        f"👨‍💼 *АДМИН ПАНЕЛЬ IT ОТДЕЛА*\n\n"
-        f"📊 *Статистика:*\n"
-        f"• 🆕 Новые заявки: {new_requests}\n"
-        f"• 🔄 В работе: {in_progress_requests}\n"
-        f"• 📋 Всего заявок: {len(requests)}\n\n"
-        f"📋 *Управление заявками:*"
+        f"👨‍💼 *АДМИН ПАНЕЛЬ {Config.IT_DEPARTMENT_NAME.upper()}*\n\n"
+        f"📊 *СТАТИСТИКА СИСТЕМЫ:*\n"
+        f"• 📋 Всего заявок: {stats['total']}\n"
+        f"• 🆕 Новые: {stats['new']}\n"
+        f"• 🔄 В работе: {stats['in_progress']}\n"
+        f"• ✅ Выполнено: {stats['completed']}\n"
+        f"• 🎯 Эффективность: {stats['efficiency']}%\n"
+        f"• ⭐ Средняя оценка: {stats['avg_rating']}/5\n"
+        f"• 🚀 Выполнено сегодня: {stats['completed_today']}\n\n"
+        f"📋 *УПРАВЛЕНИЕ ЗАЯВКАМИ:*"
     )
     
     keyboard = [
-        ["📋 Новые заявки", "🔄 Заявки в работе"],
-        ["📊 Общая статистика", "🔙 Главное меню"]
+        ["📋 Новые заявки", "🔄 В работе"],
+        ["✅ Выполненные", "📊 Общая статистика"],
+        ["🔙 Главное меню"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -941,41 +1058,55 @@ async def admin_requests_command(update: Update, context: ContextTypes.DEFAULT_T
     if update.message.text == "📋 Новые заявки":
         status_filter = 'new'
         title = "🆕 НОВЫЕ ЗАЯВКИ"
-    elif update.message.text == "🔄 Заявки в работе":
+        emoji = "🆕"
+    elif update.message.text == "🔄 В работе":
         status_filter = 'in_progress'
         title = "🔄 ЗАЯВКИ В РАБОТЕ"
+        emoji = "🔄"
+    elif update.message.text == "✅ Выполненные":
+        status_filter = 'completed'
+        title = "✅ ВЫПОЛНЕННЫЕ ЗАЯВКИ"
+        emoji = "✅"
     else:
         title = "📋 ВСЕ ЗАЯВКИ"
+        emoji = "📋"
     
-    requests = db.get_requests(status=status_filter)
+    requests = db.get_requests(status=status_filter, limit=20)
     if not requests:
-        await update.message.reply_text("📭 Заявок нет.")
+        await update.message.reply_text(f"📭 Заявок в этой категории нет.")
         return
     
-    requests_text = f"{title}\n\n"
+    requests_text = f"{emoji} *{title}*\n\n"
     
-    for req in requests[:10]:
+    for req in requests:
         status_emoji = {
             'new': '🆕',
             'in_progress': '🔄', 
             'completed': '✅'
         }.get(req['status'], '❓')
         
+        created_date = datetime.fromisoformat(req['created_at']).strftime('%d.%m %H:%M')
+        
         requests_text += (
             f"{status_emoji} *Заявка #{req['id']}*\n"
             f"👤 {req['username']} | 📞 {req['phone']}\n"
-            f"🔧 {req['problem'][:80]}...\n"
-            f"🕒 {req['created_at'][:16]}\n\n"
+            f"🔧 {req['problem'][:60]}...\n"
+            f"🕒 {created_date}\n"
         )
+        
+        if req['assigned_admin']:
+            requests_text += f"👨‍💼 {req['assigned_admin']}\n"
+        
+        requests_text += "\n"
     
-    keyboard = [["🔙 Назад в админку"]]
+    keyboard = [["🔙 Назад в админку", "🔙 Главное меню"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(requests_text, 
                                   reply_markup=reply_markup,
                                   parse_mode=ParseMode.MARKDOWN)
 
-# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
+# ==================== УЛУЧШЕННЫЕ ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """📂 Показывает заявки пользователя"""
@@ -983,48 +1114,117 @@ async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     requests = db.get_user_requests(user_id)
     
     if not requests:
-        await update.message.reply_text("📭 У вас пока нет заявок.")
+        keyboard = [["📝 Создать заявку", "🔙 Главное меню"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        await update.message.reply_text(
+            "📭 У вас пока нет заявок.\n\n"
+            "💡 Создайте первую заявку, и мы поможем решить вашу проблему!",
+            reply_markup=reply_markup
+        )
         return
     
     requests_text = "📂 *ВАШИ ЗАЯВКИ*\n\n"
     
-    for req in requests[:10]:
+    for req in requests[:15]:  # Показываем последние 15 заявок
         status_emoji = {
             'new': '🆕',
             'in_progress': '🔄', 
             'completed': '✅'
         }.get(req['status'], '❓')
         
+        created_date = datetime.fromisoformat(req['created_at']).strftime('%d.%m.%Y')
+        
         requests_text += (
             f"{status_emoji} *Заявка #{req['id']}*\n"
             f"📝 {req['problem'][:50]}...\n"
-            f"⏰ {req['created_at'][:10]}\n"
-            f"🔸 Статус: {req['status']}\n\n"
+            f"📅 {created_date}\n"
+            f"🔸 Статус: {req['status']}\n"
         )
+        
+        if req['user_rating'] > 0:
+            requests_text += f"⭐ Оценка: {'★' * req['user_rating']}{'☆' * (5 - req['user_rating'])}\n"
+        
+        requests_text += "\n"
     
-    keyboard = [["🔙 Главное меню"]]
+    keyboard = [["📝 Создать заявку", "🔙 Главное меню"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(requests_text, 
                                   reply_markup=reply_markup,
                                   parse_mode=ParseMode.MARKDOWN)
 
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """📊 Показывает статистику для пользователя"""
+    stats = db.get_statistics()
+    
+    stats_text = (
+        f"📊 *СТАТИСТИКА {Config.IT_DEPARTMENT_NAME.upper()}*\n\n"
+        f"🏢 *{Config.COMPANY_NAME}*\n\n"
+        f"📈 *ОБЩАЯ СТАТИСТИКА:*\n"
+        f"• 📋 Всего заявок: {stats['total']}\n"
+        f"• ✅ Выполнено: {stats['completed']}\n"
+        f"• 🎯 Эффективность: {stats['efficiency']}%\n"
+        f"• ⭐ Средняя оценка: {stats['avg_rating']}/5\n"
+        f"• 🚀 Выполнено сегодня: {stats['completed_today']}\n\n"
+        f"💡 *Мы работаем для вашего комфорта!*"
+    )
+    
+    keyboard = [["📝 Создать заявку", "🔙 Главное меню"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        stats_text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """📞 Показывает контакты отдела"""
+    contacts_text = (
+        f"👨‍💼 *КОНТАКТЫ {Config.IT_DEPARTMENT_NAME.upper()}*\n\n"
+        f"🏢 *{Config.COMPANY_NAME}*\n\n"
+        f"📞 *Телефон:* {Config.SUPPORT_PHONE}\n"
+        f"📧 *Email:* {Config.SUPPORT_EMAIL}\n"
+        f"🕒 *Время работы:* 9:00 - 18:00\n"
+        f"📍 *Местоположение:* [Укажите адрес]\n\n"
+        f"💡 *Также вы можете:*\n"
+        f"• 📝 Создать заявку через бота\n"
+        f"• 📂 Отслеживать статус заявок\n"
+        f"• ⭐ Оценивать качество работы\n\n"
+        f"🚀 *Мы всегда готовы помочь!*"
+    )
+    
+    keyboard = [["📝 Создать заявку", "🔙 Главное меню"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        contacts_text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """🆘 Показывает справку"""
     help_text = (
-        "🆘 *ПОМОЩЬ IT ОТДЕЛА*\n\n"
-        "🎯 *Основные команды:*\n"
-        "• /start - 🏠 Главное меню\n"
-        "• /new_request - 📝 Создать заявку\n"
-        "• /my_requests - 📂 Мои заявки\n"
-        "• /help - 🆘 Помощь\n\n"
-        "👨‍💼 *Для администраторов:*\n"
-        "• /admin - 👨‍💼 Админ панель\n\n"
-        "💡 *Совет:* Используйте кнопки меню для быстрого доступа к функциям!\n\n"
-        "📞 *Контакты IT отдела:*\n"
-        "• Телефон: [номер телефона]\n"
-        "• Email: [email адрес]\n"
-        "• Кабинет: [номер кабинета]"
+        f"🆘 *ПОМОЩЬ {Config.IT_DEPARTMENT_NAME.upper()}*\n\n"
+        f"🎯 *ОСНОВНЫЕ КОМАНДЫ:*\n"
+        f"• /start - 🏠 Главное меню\n"
+        f"• /new_request - 📝 Создать заявку\n"
+        f"• /my_requests - 📂 Мои заявки\n"
+        f"• /help - 🆘 Помощь\n\n"
+        f"💡 *КАК РАБОТАЕТ СИСТЕМА:*\n"
+        f"1. 📝 Создайте заявку с описанием проблемы\n"
+        f"2. 📎 Прикрепите фото/видео (по желанию)\n"
+        f"3. 🔄 Отслеживайте статус заявки\n"
+        f"4. ✅ Получайте уведомления о выполнении\n"
+        f"5. ⭐ Оценивайте качество работы\n\n"
+        f"👨‍💼 *ДЛЯ АДМИНИСТРАТОРОВ:*\n"
+        f"• /admin - 👨‍💼 Админ панель\n\n"
+        f"📞 *ЭКСТРЕННАЯ ПОМОЩЬ:*\n"
+        f"Телефон: {Config.SUPPORT_PHONE}\n"
+        f"Email: {Config.SUPPORT_EMAIL}\n\n"
+        f"💼 *Мы ценим ваше время и стремимся к лучшему сервису!*"
     )
     
     keyboard = [["🔙 Главное меню"]]
@@ -1044,6 +1244,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await show_user_requests(update, context)
     elif text == "📝 Создать заявку":
         await new_request_command(update, context)
+    elif text == "📊 Статистика":
+        await show_statistics(update, context)
+    elif text == "👨‍💼 Контакты отдела":
+        await show_contacts(update, context)
     elif text == "🆘 Помощь":
         await help_command(update, context)
     elif text == "🔙 Главное меню":
@@ -1056,14 +1260,22 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await admin_requests_command(update, context)
     elif text == "📋 Новые заявки" and Config.is_admin(user_id):
         await admin_requests_command(update, context)
-    elif text == "🔄 Заявки в работе" and Config.is_admin(user_id):
+    elif text == "🔄 В работе" and Config.is_admin(user_id):
+        await admin_requests_command(update, context)
+    elif text == "✅ Выполненные" and Config.is_admin(user_id):
         await admin_requests_command(update, context)
     elif text == "📊 Общая статистика" and Config.is_admin(user_id):
         await admin_panel_command(update, context)
     elif text == "🔙 Назад в админку" and Config.is_admin(user_id):
         await admin_panel_command(update, context)
     else:
-        await update.message.reply_text("🤔 Пожалуйста, используйте кнопки меню.")
+        keyboard = [["🔙 Главное меню"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        
+        await update.message.reply_text(
+            "🤔 Не понимаю ваше сообщение. Пожалуйста, используйте кнопки меню.",
+            reply_markup=reply_markup
+        )
 
 # ==================== НАСТРОЙКА ОБРАБОТЧИКОВ ====================
 
@@ -1093,7 +1305,7 @@ def setup_handlers(application: Application):
     application.add_handler(request_conv_handler)
     
     # Обработчики callback (кнопки администраторов)
-    application.add_handler(CallbackQueryHandler(handle_admin_buttons, pattern="^(take_|details_|complete_)"))
+    application.add_handler(CallbackQueryHandler(handle_admin_buttons, pattern="^(take_|details_|complete_|feedback_)"))
     
     # Обработчик комментариев администратора
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_comment))
@@ -1128,14 +1340,18 @@ def main() -> None:
         
         logger.info("🚀 Бот IT отдела успешно запущен!")
         print("🎉 Бот IT отдела завода Контакт успешно запущен!")
-        print("✨ ВОЗМОЖНОСТИ:")
-        print("   • 🏢 Только IT отдел")
-        print("   • 📝 Создание заявок с медиа файлами")
-        print("   • 👨‍💼 Кнопки для администраторов")
-        print("   • 💬 Комментарии к выполненным заявкам")
-        print("   • 📊 Интеграция с Google Sheets")
-        print("   • 🔙 Кнопки 'Назад' на всех этапах")
-        print("   • 🎉 Приветствие завода Контакт")
+        print("✨ УЛУЧШЕННЫЕ ВОЗМОЖНОСТИ:")
+        print("   • 🏢 Адаптация под завод Контакт")
+        print("   • 📝 Умное создание заявок с валидацией")
+        print("   • 📎 Поддержка фото, видео и документов")
+        print("   • ⭐ Система оценок и отзывов")
+        print("   • 📊 Детальная статистика")
+        print("   • 🔙 Улучшенная навигация с кнопками 'Назад'")
+        print("   • 👨‍💼 Полная админ-панель")
+        print("   • 💬 Комментарии к выполненным работам")
+        print("   • 🔔 Умные уведомления")
+        print("   • 📈 Аналитика эффективности")
+        print("   • 🎯 Профессиональные шаблоны сообщений")
         print("\n🚀 Бот готов к работе!")
         
         # Запуск бота
