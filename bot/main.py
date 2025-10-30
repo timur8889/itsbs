@@ -31,7 +31,7 @@ from telegram.ext import (
 class Config:
     """Конфигурация приложения"""
     # Безопасное получение токена из переменных окружения
-    BOT_TOKEN = os.getenv('7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnHw')
+    BOT_TOKEN = os.getenv("7391146893:AAFDi7qQTWjscSeqNBueKlWXbaXK99NpnH")
     
     # Супер-админ (имеет доступ ко всем отделам + массовая рассылка)
     SUPER_ADMIN_IDS = [5024165375]
