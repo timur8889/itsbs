@@ -8,3 +8,4 @@ matplotlib==3.7.2
 seaborn==0.12.2
 google-auth-oauthlib==1.1.0
 google-auth-httplib2==0.1.1
+phonenumbers==8.13.27
