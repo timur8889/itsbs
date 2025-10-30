@@ -84,7 +84,7 @@ def setup_logging():
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# ==================== УЛУЧШЕННАЯ КОНФИГУРАЦИЯ ====================
 
 class Config:
     """Конфигурация бота"""
@@ -124,17 +124,17 @@ class Config:
             if not getattr(Config, var):
                 raise ValueError(f"Не задана обязательная переменная: {var}")
 
-# ==================== БАЗА ДАННЫХ ====================
+# ==================== УЛУЧШЕННАЯ БАЗА ДАННЫХ ====================
 
-class Database:
-    """Класс для работы с базой данных"""
+class EnhancedDatabase:
+    """Улучшенный класс для работы с базой данных"""
     
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.init_db()
+        self.init_enhanced_db()
     
-    def init_db(self):
-        """Инициализация базы данных"""
+    def init_enhanced_db(self):
+        """Инициализация улучшенной базы данных"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -168,6 +168,69 @@ class Database:
                     created_at TEXT
                 )
             ''')
+            
+            # Таблица рейтингов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS request_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id INTEGER,
+                    user_id INTEGER,
+                    admin_id INTEGER,
+                    admin_name TEXT,
+                    rating INTEGER CHECK(rating >= 1 AND rating <= 5),
+                    comment TEXT,
+                    created_at TEXT,
+                    FOREIGN KEY (request_id) REFERENCES requests (id)
+                )
+            ''')
+            
+            # Таблица настроек
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    description TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            
+            # Таблица шаблонов ответов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS response_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    department TEXT,
+                    title TEXT,
+                    template_text TEXT,
+                    created_at TEXT
+                )
+            ''')
+            
+            # Таблица SLA метрик
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sla_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id INTEGER,
+                    response_time_minutes INTEGER,
+                    resolution_time_minutes INTEGER,
+                    met_sla BOOLEAN,
+                    created_at TEXT,
+                    FOREIGN KEY (request_id) REFERENCES requests (id)
+                )
+            ''')
+            
+            # Начальные настройки
+            default_settings = [
+                ('enable_ai_analysis', 'true', 'Включить AI анализ заявок', datetime.now().isoformat()),
+                ('enable_ratings', 'true', 'Включить систему рейтингов', datetime.now().isoformat()),
+                ('auto_backup_hours', '24', 'Частота авто-бэкапов (часы)', datetime.now().isoformat()),
+                ('work_hours_start', '9', 'Начало рабочего дня', datetime.now().isoformat()),
+                ('work_hours_end', '22', 'Конец рабочего дня', datetime.now().isoformat()),
+            ]
+            
+            cursor.executemany('''
+                INSERT OR REPLACE INTO bot_settings (key, value, description, updated_at)
+                VALUES (?, ?, ?, ?)
+            ''', default_settings)
             
             conn.commit()
     
@@ -206,6 +269,11 @@ class Database:
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
     
+    @lru_cache(maxsize=100)
+    def get_request_cached(self, request_id: int) -> Optional[Dict]:
+        """Получает заявку по ID с кэшированием"""
+        return self.get_request(request_id)
+    
     def get_request(self, request_id: int) -> Optional[Dict]:
         """Получает заявку по ID"""
         with sqlite3.connect(self.db_path) as conn:
@@ -241,6 +309,8 @@ class Database:
                     WHERE id = ?
                 ''', (status, request_id))
             
+            # Очищаем кэш для этой заявки
+            self.get_request_cached.cache_clear()
             conn.commit()
     
     def get_user_requests(self, user_id: int) -> List[Dict]:
@@ -255,8 +325,61 @@ class Database:
             columns = [column[0] for column in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
     
+    def get_advanced_statistics(self) -> Dict[str, Any]:
+        """Получает расширенную статистику"""
+        basic_stats = self.get_statistics()
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Среднее время выполнения
+            cursor.execute('''
+                SELECT AVG(
+                    (julianday(completed_at) - julianday(created_at)) * 24 * 60
+                ) as avg_completion_time
+                FROM requests 
+                WHERE status = 'completed' AND completed_at IS NOT NULL
+            ''')
+            avg_time_result = cursor.fetchone()
+            avg_time = avg_time_result[0] or 0 if avg_time_result else 0
+            
+            # Статистика по срочности
+            cursor.execute('''
+                SELECT urgency, COUNT(*), 
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+                FROM requests 
+                GROUP BY urgency
+            ''')
+            urgency_stats = {}
+            for row in cursor.fetchall():
+                urgency_stats[row[0]] = {'total': row[1], 'completed': row[2]}
+            
+            # Рейтинги администраторов
+            cursor.execute('''
+                SELECT assigned_admin, COUNT(*), 
+                       AVG((julianday(completed_at) - julianday(assigned_at)) * 24 * 60)
+                FROM requests 
+                WHERE status = 'completed' AND assigned_admin IS NOT NULL
+                GROUP BY assigned_admin
+            ''')
+            admin_stats = {}
+            for row in cursor.fetchall():
+                admin_stats[row[0]] = {
+                    'completed_requests': row[1], 
+                    'avg_completion_time': row[2] or 0
+                }
+        
+        basic_stats.update({
+            'avg_completion_time_minutes': round(avg_time, 1),
+            'urgency_stats': urgency_stats,
+            'admin_stats': admin_stats,
+            'efficiency': (basic_stats['completed'] / basic_stats['total'] * 100) if basic_stats['total'] > 0 else 0
+        })
+        
+        return basic_stats
+    
     def get_statistics(self) -> Dict[str, Any]:
-        """Получает статистику заявок"""
+        """Получает базовую статистику заявок"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -299,36 +422,12 @@ class Database:
                 'completed': total_stats[3],
                 'by_department': department_stats
             }
-    
-    def get_request_cached(self, request_id: int) -> Optional[Dict]:
-        """Получает заявку с кэшированием"""
-        return self.get_request(request_id)
 
 # ==================== РЕЙТИНГИ И АНАЛИТИКА ====================
 
-class RatingSystem:
-    """Система рейтингов и отзывов"""
+class EnhancedRatingSystem:
+    """Улучшенная система рейтингов и отзывов"""
     
-    @staticmethod
-    def init_ratings_db(db_path: str):
-        """Инициализация таблицы рейтингов"""
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS request_ratings (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    request_id INTEGER,
-                    user_id INTEGER,
-                    admin_id INTEGER,
-                    admin_name TEXT,
-                    rating INTEGER CHECK(rating >= 1 AND rating <= 5),
-                    comment TEXT,
-                    created_at TEXT,
-                    FOREIGN KEY (request_id) REFERENCES requests (id)
-                )
-            ''')
-            conn.commit()
-
     @staticmethod
     def save_rating(db_path: str, request_id: int, user_id: int, admin_id: int, admin_name: str, rating: int, comment: str = ""):
         """Сохраняет оценку заявки"""
@@ -369,9 +468,6 @@ class RatingSystem:
                 'one_stars': result[6]
             }
 
-class EnhancedRatingSystem(RatingSystem):
-    """Расширенная система рейтингов"""
-    
     @staticmethod
     def get_rating_stats(db_path: str, days: int = 30) -> Dict[str, Any]:
         """Получает статистику рейтингов за период"""
@@ -530,40 +626,6 @@ class WorkflowAutomator:
         except Exception as e:
             logger.error(f"Ошибка уведомления о таймауте: {e}")
 
-# ==================== РАСШИРЕННАЯ КОНФИГУРАЦИЯ ====================
-
-class EnhancedConfig(Config):
-    """Расширенная конфигурация с настройками из БД"""
-    
-    @classmethod
-    def init_settings_db(cls, db_path: str):
-        """Инициализация таблицы настроек"""
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    description TEXT,
-                    updated_at TEXT
-                )
-            ''')
-            
-            # Начальные настройки
-            default_settings = [
-                ('enable_ai_analysis', 'true', 'Включить AI анализ заявок', datetime.now().isoformat()),
-                ('enable_ratings', 'true', 'Включить систему рейтингов', datetime.now().isoformat()),
-                ('auto_backup_hours', '24', 'Частота авто-бэкапов (часы)', datetime.now().isoformat()),
-                ('work_hours_start', '9', 'Начало рабочего дня', datetime.now().isoformat()),
-                ('work_hours_end', '22', 'Конец рабочего дня', datetime.now().isoformat()),
-            ]
-            
-            cursor.executemany('''
-                INSERT OR REPLACE INTO bot_settings (key, value, description, updated_at)
-                VALUES (?, ?, ?, ?)
-            ''', default_settings)
-            conn.commit()
-
 # ==================== ВИЗУАЛИЗАЦИЯ ДАННЫХ ====================
 
 class DataVisualizer:
@@ -629,105 +691,6 @@ class DataVisualizer:
             logger.error(f"Ошибка создания графика: {e}")
             return None
 
-# ==================== РАСШИРЕННАЯ БАЗА ДАННЫХ ====================
-
-class EnhancedDatabase(Database):
-    """Расширенная база данных с новыми функциями"""
-    
-    def __init__(self, db_path: str):
-        super().__init__(db_path)
-        self.init_enhanced_tables()
-    
-    def init_enhanced_tables(self):
-        """Инициализация расширенных таблиц"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Таблица рейтингов
-            RatingSystem.init_ratings_db(self.db_path)
-            
-            # Таблица настроек
-            EnhancedConfig.init_settings_db(self.db_path)
-            
-            # Таблица шаблонов ответов
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS response_templates (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    department TEXT,
-                    title TEXT,
-                    template_text TEXT,
-                    created_at TEXT
-                )
-            ''')
-            
-            # Таблица SLA (Service Level Agreement)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS sla_metrics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    request_id INTEGER,
-                    response_time_minutes INTEGER,
-                    resolution_time_minutes INTEGER,
-                    met_sla BOOLEAN,
-                    created_at TEXT,
-                    FOREIGN KEY (request_id) REFERENCES requests (id)
-                )
-            ''')
-            
-            conn.commit()
-    
-    def get_advanced_statistics(self) -> Dict[str, Any]:
-        """Получает расширенную статистику"""
-        basic_stats = super().get_statistics()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Среднее время выполнения
-            cursor.execute('''
-                SELECT AVG(
-                    (julianday(completed_at) - julianday(created_at)) * 24 * 60
-                ) as avg_completion_time
-                FROM requests 
-                WHERE status = 'completed' AND completed_at IS NOT NULL
-            ''')
-            avg_time_result = cursor.fetchone()
-            avg_time = avg_time_result[0] or 0 if avg_time_result else 0
-            
-            # Статистика по срочности
-            cursor.execute('''
-                SELECT urgency, COUNT(*), 
-                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
-                FROM requests 
-                GROUP BY urgency
-            ''')
-            urgency_stats = {}
-            for row in cursor.fetchall():
-                urgency_stats[row[0]] = {'total': row[1], 'completed': row[2]}
-            
-            # Рейтинги администраторов
-            cursor.execute('''
-                SELECT assigned_admin, COUNT(*), 
-                       AVG((julianday(completed_at) - julianday(assigned_at)) * 24 * 60)
-                FROM requests 
-                WHERE status = 'completed' AND assigned_admin IS NOT NULL
-                GROUP BY assigned_admin
-            ''')
-            admin_stats = {}
-            for row in cursor.fetchall():
-                admin_stats[row[0]] = {
-                    'completed_requests': row[1], 
-                    'avg_completion_time': row[2] or 0
-                }
-        
-        basic_stats.update({
-            'avg_completion_time_minutes': round(avg_time, 1),
-            'urgency_stats': urgency_stats,
-            'admin_stats': admin_stats,
-            'efficiency': (basic_stats['completed'] / basic_stats['total'] * 100) if basic_stats['total'] > 0 else 0
-        })
-        
-        return basic_stats
-
 # ==================== МЕНЕДЖЕР БЭКАПОВ ====================
 
 class BackupManager:
@@ -777,44 +740,12 @@ class BackupManager:
         except Exception as e:
             logger.error(f"Ошибка очистки бэкапов: {e}")
 
-# ==================== ИНТЕЛЛЕКТУАЛЬНЫЕ ШАБЛОНЫ ОТВЕТОВ ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ====================
 
-class TemplateManager:
-    """Управление шаблонами ответов"""
-    
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-    
-    def get_templates(self, department: str = None) -> List[Dict]:
-        """Получает шаблоны ответов"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            if department:
-                cursor.execute('''
-                    SELECT * FROM response_templates 
-                    WHERE department = ? OR department IS NULL
-                    ORDER BY department NULLS LAST
-                ''', (department,))
-            else:
-                cursor.execute('SELECT * FROM response_templates ORDER BY department NULLS LAST')
-            
-            columns = [column[0] for column in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    
-    def add_template(self, department: str, title: str, template_text: str):
-        """Добавляет шаблон ответа"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO response_templates (department, title, template_text, created_at)
-                VALUES (?, ?, ?, ?)
-            ''', (department, title, template_text, datetime.now().isoformat()))
-            conn.commit()
+# Инициализация улучшенной базы данных
+db = EnhancedDatabase(Config.DB_PATH)
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ БОТА ====================
-
-# Инициализация базы данных
-db = EnhancedDatabase(Config.DB_PATH)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
@@ -968,7 +899,7 @@ async def request_rating_callback(update: Update, context: ContextTypes.DEFAULT_
         # Сохраняем оценку
         request = db.get_request_cached(request_id)
         if request and request['user_id'] == user_id:
-            RatingSystem.save_rating(
+            EnhancedRatingSystem.save_rating(
                 Config.DB_PATH, request_id, user_id, 
                 request.get('assigned_admin', 'Unknown'),
                 request.get('assigned_admin', 'Unknown'), 
@@ -1107,53 +1038,7 @@ async def check_timeouts(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка проверки таймаутов: {e}")
 
-# ==================== УЛУЧШЕННАЯ ИНИЦИАЛИЗАЦИЯ ====================
-
-def setup_automated_tasks(application: Application):
-    """Настройка автоматических задач"""
-    job_queue = application.job_queue
-    
-    if job_queue:
-        # Ежедневный бэкап в 2:00
-        job_queue.run_daily(
-            scheduled_backup,
-            time=time(hour=2, minute=0),
-            name="daily_backup"
-        )
-        
-        # Проверка таймаутов каждые 6 часов
-        job_queue.run_repeating(
-            check_timeouts,
-            interval=timedelta(hours=6),
-            first=10
-        )
-
-# ==================== ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ ====================
-
-async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает текстовые сообщения из меню"""
-    text = update.message.text
-    user_id = update.message.from_user.id
-    
-    if text == "📊 Статистика":
-        await enhanced_statistics_command(update, context)
-    elif text == "🤖 AI Анализ":
-        await update.message.reply_text(
-            "🤖 *AI АНАЛИЗ ТЕКСТА*\n\n"
-            "Использование: `/ai_analysis ваш текст проблемы`\n\n"
-            "Пример: `/ai_analysis не работает компьютер и принтер, срочно нужно починить`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif text == "⭐ Рейтинги":
-        await ratings_command(update, context)
-    elif text == "📋 Мои заявки":
-        await show_user_requests(update, context)
-    elif text == "📋 Создать заявку":
-        await update.message.reply_text("Для создания заявки используйте команду /new_request")
-    elif text == "🆘 Помощь":
-        await help_command(update, context)
-    else:
-        await update.message.reply_text("Пожалуйста, используйте кнопки меню или команды.")
+# ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает заявки пользователя"""
@@ -1206,6 +1091,187 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает текстовые сообщения из меню"""
+    text = update.message.text
+    user_id = update.message.from_user.id
+    
+    if text == "📊 Статистика":
+        await enhanced_statistics_command(update, context)
+    elif text == "🤖 AI Анализ":
+        await update.message.reply_text(
+            "🤖 *AI АНАЛИЗ ТЕКСТА*\n\n"
+            "Использование: `/ai_analysis ваш текст проблемы`\n\n"
+            "Пример: `/ai_analysis не работает компьютер и принтер, срочно нужно починить`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    elif text == "⭐ Рейтинги":
+        await ratings_command(update, context)
+    elif text == "📋 Мои заявки":
+        await show_user_requests(update, context)
+    elif text == "📋 Создать заявку":
+        await update.message.reply_text("Для создания заявки используйте команду /new_request")
+    elif text == "🆘 Помощь":
+        await help_command(update, context)
+    else:
+        await update.message.reply_text("Пожалуйста, используйте кнопки меню или команды.")
+
+# ==================== АДМИНСКИЕ КОМАНДЫ ====================
+
+async def admin_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает заявки для администратора"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    requests = db.get_requests(status='new')
+    if not requests:
+        await update.message.reply_text("📭 Новых заявок нет.")
+        return
+    
+    requests_text = "🆕 *НОВЫЕ ЗАЯВКИ*\n\n"
+    
+    for req in requests[:10]:
+        requests_text += (
+            f"📋 *Заявка #{req['id']}*\n"
+            f"👤 {req['username']} | 📞 {req['phone']}\n"
+            f"🏢 {req['department']}\n"
+            f"🔧 {req['problem'][:80]}...\n"
+            f"⏰ {req['urgency']}\n"
+            f"🕒 {req['created_at'][:16]}\n\n"
+        )
+    
+    await update.message.reply_text(requests_text, parse_mode=ParseMode.MARKDOWN)
+
+async def assign_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Взять заявку в работу"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /assign <id заявки>")
+        return
+    
+    try:
+        request_id = int(context.args[0])
+        request = db.get_request(request_id)
+        
+        if not request:
+            await update.message.reply_text("❌ Заявка не найдена.")
+            return
+        
+        if request['status'] != 'new':
+            await update.message.reply_text("❌ Заявка уже в работе или завершена.")
+            return
+        
+        # Обновляем статус заявки
+        admin_name = update.message.from_user.full_name
+        db.update_request_status(request_id, 'in_progress', admin_name)
+        
+        # Отправляем уведомление пользователю
+        await send_enhanced_notification(
+            context, request['user_id'], request_id, 'in_progress', admin_name
+        )
+        
+        await update.message.reply_text(
+            f"✅ Заявка #{request_id} взята в работу!\n"
+            f"👨‍💼 Исполнитель: {admin_name}"
+        )
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID заявки.")
+    except Exception as e:
+        logger.error(f"Ошибка взятия заявки: {e}")
+        await update.message.reply_text("❌ Ошибка при взятии заявки.")
+
+async def complete_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Завершить заявку"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /complete <id заявки>")
+        return
+    
+    try:
+        request_id = int(context.args[0])
+        request = db.get_request(request_id)
+        
+        if not request:
+            await update.message.reply_text("❌ Заявка не найдена.")
+            return
+        
+        if request['status'] != 'in_progress':
+            await update.message.reply_text("❌ Заявка не в работе.")
+            return
+        
+        # Обновляем статус заявки
+        db.update_request_status(request_id, 'completed')
+        
+        # Отправляем уведомление с оценкой пользователю
+        await send_enhanced_notification(
+            context, request['user_id'], request_id, 'completed'
+        )
+        
+        await update.message.reply_text(f"✅ Заявка #{request_id} завершена!")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID заявки.")
+    except Exception as e:
+        logger.error(f"Ошибка завершения заявки: {e}")
+        await update.message.reply_text("❌ Ошибка при завершении заявки.")
+
+# ==================== НАСТРОЙКА ОБРАБОТЧИКОВ ====================
+
+def setup_handlers(application: Application):
+    """Настройка всех обработчиков"""
+    
+    # Основные команды
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("my_requests", show_user_requests))
+    
+    # AI и аналитика
+    application.add_handler(CommandHandler("ai_analysis", ai_analysis_command))
+    application.add_handler(CommandHandler("advanced_stats", enhanced_statistics_command))
+    application.add_handler(CommandHandler("ratings", ratings_command))
+    
+    # Админские команды
+    application.add_handler(CommandHandler("stats", enhanced_statistics_command))
+    application.add_handler(CommandHandler("requests", admin_requests_command))
+    application.add_handler(CommandHandler("assign", assign_request_command))
+    application.add_handler(CommandHandler("complete", complete_request_command))
+    
+    # Обработчики callback (рейтинги)
+    application.add_handler(CallbackQueryHandler(request_rating_callback, pattern="^rate_"))
+    
+    # Обработчики текстовых сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+
+def setup_automated_tasks(application: Application):
+    """Настройка автоматических задач"""
+    job_queue = application.job_queue
+    
+    if job_queue:
+        # Ежедневный бэкап в 2:00
+        job_queue.run_daily(
+            scheduled_backup,
+            time=time(hour=2, minute=0),
+            name="daily_backup"
+        )
+        
+        # Проверка таймаутов каждые 6 часов
+        job_queue.run_repeating(
+            check_timeouts,
+            interval=timedelta(hours=6),
+            first=10
+        )
+
 # ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
 
 def enhanced_main() -> None:
@@ -1219,26 +1285,11 @@ def enhanced_main() -> None:
         
         application = Application.builder().token(Config.BOT_TOKEN).build()
         
-        # Настройка автоматических задач
+        # Настройка задач и обработчиков
         setup_automated_tasks(application)
+        setup_handlers(application)
         
-        # Добавление обработчиков команд
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("ai_analysis", ai_analysis_command))
-        application.add_handler(CommandHandler("advanced_stats", enhanced_statistics_command))
-        application.add_handler(CommandHandler("ratings", ratings_command))
-        application.add_handler(CommandHandler("my_requests", show_user_requests))
-        
-        # Добавление обработчика рейтингов
-        application.add_handler(CallbackQueryHandler(request_rating_callback, pattern="^rate_"))
-        
-        # Обработчик текстовых сообщений (для меню)
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
-        
-        # TODO: Добавьте остальные обработчики из оригинального кода (создание заявок, админские команды и т.д.)
-        
-        logger.info("🤖 УЛУЧШЕННЫЙ бот заявок успешно запущен!")
+        logger.info("🚀 Улучшенный бот успешно запущен!")
         print("✅ УЛУЧШЕННЫЙ бот успешно запущен!")
         print("🎯 ДОБАВЛЕННЫЕ ВОЗМОЖНОСТИ:")
         print("   • 🤖 AI анализ текста заявок")
@@ -1249,6 +1300,8 @@ def enhanced_main() -> None:
         print("   • ⏰ Умные уведомления")
         print("   • 📈 Расширенная аналитика")
         print("   • 🔧 Автоматизация рабочих процессов")
+        print("   • 🗃️ Кэширование для производительности")
+        print("   • 👨‍💼 Полный набор админских команд")
         print("\n🚀 Бот готов к работе!")
         
         application.run_polling()
