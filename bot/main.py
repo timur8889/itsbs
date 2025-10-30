@@ -5,7 +5,6 @@ import json
 import re
 import time
 import asyncio
-import gspread
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import (
@@ -31,6 +30,18 @@ from telegram.ext import (
 from dotenv import load_dotenv
 load_dotenv()
 
+# ==================== ЛОГИРОВАНИЕ ====================
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # ==================== КОНФИГУРАЦИЯ ====================
 
 class Config:
@@ -40,16 +51,6 @@ class Config:
     
     if not BOT_TOKEN:
         raise ValueError("❌ BOT_TOKEN не установлен! Добавьте его в .env файл или переменные окружения")
-    
-    # Настройки Google Sheets
-    GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS', 'credentials.json')
-    
-    # ID таблиц для каждого отдела
-    GOOGLE_SHEETS_IDS = {
-        '💻 IT отдел': os.getenv('IT_SHEET_ID'),
-        '🔧 Механика': os.getenv('MECHANICS_SHEET_ID'), 
-        '⚡ Электрика': os.getenv('ELECTRICITY_SHEET_ID')
-    }
     
     # Супер-админ (имеет доступ ко всем отделам + массовая рассылка)
     SUPER_ADMIN_IDS = [5024165375]
@@ -62,125 +63,29 @@ class Config:
     }
     
     DB_PATH = "requests.db"
-    LOG_LEVEL = logging.INFO
     REQUEST_TIMEOUT_HOURS = 48
 
     @classmethod
-    def get_google_sheet_id(cls, department: str) -> str:
-        """Получает ID Google Sheets для отдела"""
-        return cls.GOOGLE_SHEETS_IDS.get(department, '')
+    def is_super_admin(cls, user_id: int) -> bool:
+        """Проверяет является ли пользователь супер-админом"""
+        return user_id in cls.SUPER_ADMIN_IDS
 
-# ==================== GOOGLE SHEETS ИНТЕГРАЦИЯ ====================
-
-class GoogleSheetsManager:
-    """Менеджер для работы с Google Sheets"""
-    
-    def __init__(self):
-        self.credentials_file = Config.GOOGLE_SHEETS_CREDENTIALS
-        self.client = None
-        self._connect()
-    
-    def _connect(self):
-        """Подключается к Google Sheets API"""
-        try:
-            if os.path.exists(self.credentials_file):
-                self.client = gspread.service_account(filename=self.credentials_file)
-                logger.info("✅ Успешное подключение к Google Sheets API")
-            else:
-                logger.warning("❌ Файл credentials.json не найден. Google Sheets отключен.")
-                self.client = None
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
-            self.client = None
-    
-    def add_request_to_sheet(self, department: str, request_data: Dict) -> bool:
-        """Добавляет заявку в Google Sheets соответствующего отдела"""
-        try:
-            if not self.client:
-                return False
-            
-            sheet_id = Config.get_google_sheet_id(department)
-            if not sheet_id:
-                logger.warning(f"❌ ID таблицы для отдела {department} не найден")
-                return False
-            
-            # Открываем таблицу
-            spreadsheet = self.client.open_by_key(sheet_id)
-            worksheet = spreadsheet.sheet1
-            
-            # Подготавливаем данные для записи
-            row_data = [
-                request_data['id'],
-                request_data['created_at'][:16],
-                request_data['name'],
-                request_data['phone'],
-                request_data['system_type'],
-                request_data['plot'],
-                request_data['urgency'],
-                request_data['problem'],
-                request_data['status'],
-                request_data.get('assigned_admin', ''),
-                request_data.get('admin_comment', ''),
-                request_data.get('completed_at', '')
-            ]
-            
-            # Добавляем строку
-            worksheet.append_row(row_data)
-            logger.info(f"✅ Заявка #{request_data['id']} добавлена в Google Sheets отдела {department}")
+    @classmethod
+    def is_admin(cls, user_id: int, department: str = None) -> bool:
+        """Проверяет является ли пользователь админом"""
+        if cls.is_super_admin(user_id):
             return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка добавления заявки в Google Sheets: {e}")
-            return False
-    
-    def update_request_in_sheet(self, department: str, request_data: Dict) -> bool:
-        """Обновляет заявку в Google Sheets"""
-        try:
-            if not self.client:
-                return False
-            
-            sheet_id = Config.get_google_sheet_id(department)
-            if not sheet_id:
-                return False
-            
-            spreadsheet = self.client.open_by_key(sheet_id)
-            worksheet = spreadsheet.sheet1
-            
-            # Находим строку с заявкой
-            cells = worksheet.find(str(request_data['id']))
-            if not cells:
-                return False
-            
-            row_num = cells.row
-            
-            # Обновляем данные
-            update_data = [
-                request_data['id'],
-                request_data['created_at'][:16],
-                request_data['name'],
-                request_data['phone'],
-                request_data['system_type'],
-                request_data['plot'],
-                request_data['urgency'],
-                request_data['problem'],
-                request_data['status'],
-                request_data.get('assigned_admin', ''),
-                request_data.get('admin_comment', ''),
-                request_data.get('completed_at', '')
-            ]
-            
-            for i, value in enumerate(update_data, 1):
-                worksheet.update_cell(row_num, i, value)
-            
-            logger.info(f"✅ Заявка #{request_data['id']} обновлена в Google Sheets")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обновления заявки в Google Sheets: {e}")
-            return False
+        if department:
+            return user_id in cls.ADMIN_CHAT_IDS.get(department, [])
+        for dept_admins in cls.ADMIN_CHAT_IDS.values():
+            if user_id in dept_admins:
+                return True
+        return False
 
-# Инициализация Google Sheets менеджера
-gsheets_manager = GoogleSheetsManager()
+    @classmethod
+    def get_admins_for_department(cls, department: str) -> List[int]:
+        """Получает список админов для отдела"""
+        return cls.ADMIN_CHAT_IDS.get(department, [])
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -229,9 +134,9 @@ class Database:
                     )
                 ''')
                 conn.commit()
-                logger.info("База данных успешно инициализирована")
+                logger.info("✅ База данных успешно инициализирована")
         except Exception as e:
-            logger.error(f"Ошибка инициализации базы данных: {e}")
+            logger.error(f"❌ Ошибка инициализации базы данных: {e}")
             raise
 
     def save_request(self, user_data: Dict) -> int:
@@ -259,16 +164,26 @@ class Database:
                 ))
                 request_id = cursor.lastrowid
                 conn.commit()
-                
-                # Добавляем в Google Sheets
-                request_data = self.get_request(request_id)
-                if request_data:
-                    gsheets_manager.add_request_to_sheet(user_data.get('department'), request_data)
-                
+                logger.info(f"✅ Заявка #{request_id} успешно сохранена")
                 return request_id
         except Exception as e:
-            logger.error(f"Ошибка при сохранении заявки: {e}")
+            logger.error(f"❌ Ошибка при сохранении заявки: {e}")
             raise
+
+    def get_request(self, request_id: int) -> Dict:
+        """Получает заявку по ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM requests WHERE id = ?', (request_id,))
+                row = cursor.fetchone()
+                if row:
+                    columns = [column[0] for column in cursor.description]
+                    return dict(zip(columns, row))
+                return {}
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении заявки #{request_id}: {e}")
+            return {}
 
     def update_request_status(self, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
         """Обновляет статус заявки"""
@@ -302,15 +217,9 @@ class Database:
                 cursor.execute(sql, parameters)
                 
                 conn.commit()
-                
-                # Обновляем в Google Sheets
-                request_data = self.get_request(request_id)
-                if request_data:
-                    gsheets_manager.update_request_in_sheet(request_data['department'], request_data)
-                
-                logger.info(f"Статус заявки #{request_id} изменен на '{status}'")
+                logger.info(f"✅ Статус заявки #{request_id} изменен на '{status}'")
         except Exception as e:
-            logger.error(f"Ошибка при обновлении статуса заявки #{request_id}: {e}")
+            logger.error(f"❌ Ошибка при обновлении статуса заявки #{request_id}: {e}")
             raise
 
     def add_comment_to_request(self, request_id: int, admin_id: int, admin_name: str, comment: str):
@@ -323,9 +232,9 @@ class Database:
                     VALUES (?, ?, ?, ?, ?)
                 ''', (request_id, admin_id, admin_name, comment, datetime.now().isoformat()))
                 conn.commit()
-                logger.info(f"Комментарий добавлен к заявке #{request_id}")
+                logger.info(f"✅ Комментарий добавлен к заявке #{request_id}")
         except Exception as e:
-            logger.error(f"Ошибка добавления комментария к заявке #{request_id}: {e}")
+            logger.error(f"❌ Ошибка добавления комментария к заявке #{request_id}: {e}")
             raise
 
     def get_request_comments(self, request_id: int) -> List[Dict]:
@@ -341,7 +250,75 @@ class Database:
                 columns = [column[0] for column in cursor.description]
                 return [dict(zip(columns, row)) for row in cursor.fetchall()]
         except Exception as e:
-            logger.error(f"Ошибка получения комментариев заявки #{request_id}: {e}")
+            logger.error(f"❌ Ошибка получения комментариев заявки #{request_id}: {e}")
+            return []
+
+    def get_requests_by_filter(self, department: str = None, status: str = 'all', limit: int = 50) -> List[Dict]:
+        """Получает заявки по фильтру отдела и статуса"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                status_conditions = {
+                    'new': "status = 'new'",
+                    'in_progress': "status = 'in_progress'", 
+                    'completed': "status = 'completed'",
+                    'all': "status IN ('new', 'in_progress', 'completed')"
+                }
+                
+                status_filter = status_conditions.get(status, "status IN ('new', 'in_progress')")
+                
+                if department:
+                    query = f'''
+                        SELECT * FROM requests 
+                        WHERE department = ? AND {status_filter}
+                        ORDER BY 
+                            CASE urgency 
+                                WHEN '🔥 СРОЧНО (1-2 часа)' THEN 1
+                                WHEN '⚠️ СЕГОДНЯ (до конца дня)' THEN 2
+                                ELSE 3
+                            END,
+                            created_at DESC
+                        LIMIT ?
+                    '''
+                    cursor.execute(query, (department, limit))
+                else:
+                    query = f'''
+                        SELECT * FROM requests 
+                        WHERE {status_filter}
+                        ORDER BY 
+                            CASE urgency 
+                                WHEN '🔥 СРОЧНО (1-2 часа)' THEN 1
+                                WHEN '⚠️ СЕГОДНЯ (до конца дня)' THEN 2
+                                ELSE 3
+                            END,
+                            created_at DESC
+                        LIMIT ?
+                    '''
+                    cursor.execute(query, (limit,))
+                
+                columns = [column[0] for column in cursor.description]
+                requests = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return requests
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении заявок: {e}")
+            return []
+
+    def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """Получает заявки пользователя"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM requests 
+                    WHERE user_id = ? 
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                ''', (user_id, limit))
+                columns = [column[0] for column in cursor.description]
+                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении заявок пользователя {user_id}: {e}")
             return []
 
 # Инициализация базы данных
@@ -372,6 +349,43 @@ def create_comment_keyboard(request_id: int) -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# ==================== ФОРМАТИРОВАНИЕ ТЕКСТА ====================
+
+def format_request_text(request: Dict) -> str:
+    """Форматирует текст заявки"""
+    status_emoji = {
+        'new': '🆕',
+        'in_progress': '🔄',
+        'completed': '✅'
+    }.get(request['status'], '❓')
+    
+    return (
+        f"📋 *Заявка #{request['id']}* {status_emoji}\n\n"
+        f"👤 *ФИО:* {request['name']}\n"
+        f"📞 *Телефон:* {request['phone']}\n"
+        f"🏢 *Отдел:* {request['department']}\n"
+        f"🔧 *Тип проблемы:* {request['system_type']}\n"
+        f"📍 *Участок:* {request['plot']}\n"
+        f"⏰ *Срочность:* {request['urgency']}\n"
+        f"📝 *Описание:* {request['problem'][:200]}...\n"
+        f"👨‍💼 *Исполнитель:* {request.get('assigned_admin', 'Не назначен')}\n"
+        f"🕒 *Создана:* {request['created_at'][:16]}\n"
+        f"💬 *Комментарий:* {request.get('admin_comment', 'Нет комментария')}"
+    )
+
+def format_detailed_request_text(request: Dict, comments: List[Dict]) -> str:
+    """Форматирует детальный текст заявки с комментариями"""
+    base_text = format_request_text(request)
+    
+    comments_text = "\n\n💬 *История комментариев:*\n"
+    if comments:
+        for comment in comments:
+            comments_text += f"\n👤 {comment['admin_name']} ({comment['created_at'][:16]}):\n{comment['comment']}\n"
+    else:
+        comments_text += "\n📭 Комментариев пока нет"
+    
+    return base_text + comments_text
 
 # ==================== ОБРАБОТЧИКИ INLINE КНОПОК ====================
 
@@ -446,7 +460,7 @@ async def take_request_inline(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         
     except Exception as e:
-        logger.error(f"Ошибка взятия заявки: {e}")
+        logger.error(f"❌ Ошибка взятия заявки: {e}")
         await query.edit_message_text("❌ Ошибка при взятии заявки")
 
 async def complete_request_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -483,7 +497,7 @@ async def complete_request_inline(update: Update, context: ContextTypes.DEFAULT_
         )
         
     except Exception as e:
-        logger.error(f"Ошибка завершения заявки: {e}")
+        logger.error(f"❌ Ошибка завершения заявки: {e}")
         await query.edit_message_text("❌ Ошибка при завершении заявки")
 
 async def add_comment_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -517,7 +531,7 @@ async def add_comment_inline(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         
     except Exception as e:
-        logger.error(f"Ошибка добавления комментария: {e}")
+        logger.error(f"❌ Ошибка добавления комментария: {e}")
         await query.edit_message_text("❌ Ошибка при добавлении комментария")
 
 async def start_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -554,7 +568,7 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         
     except Exception as e:
-        logger.error(f"Ошибка показа деталей заявки: {e}")
+        logger.error(f"❌ Ошибка показа деталей заявки: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке деталей")
 
 async def show_request_with_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -579,45 +593,8 @@ async def show_request_with_actions(update: Update, context: ContextTypes.DEFAUL
         )
         
     except Exception as e:
-        logger.error(f"Ошибка возврата к заявке: {e}")
+        logger.error(f"❌ Ошибка возврата к заявке: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке заявки")
-
-# ==================== ФОРМАТИРОВАНИЕ ТЕКСТА ====================
-
-def format_request_text(request: Dict) -> str:
-    """Форматирует текст заявки"""
-    status_emoji = {
-        'new': '🆕',
-        'in_progress': '🔄',
-        'completed': '✅'
-    }.get(request['status'], '❓')
-    
-    return (
-        f"📋 *Заявка #{request['id']}* {status_emoji}\n\n"
-        f"👤 *ФИО:* {request['name']}\n"
-        f"📞 *Телефон:* {request['phone']}\n"
-        f"🏢 *Отдел:* {request['department']}\n"
-        f"🔧 *Тип проблемы:* {request['system_type']}\n"
-        f"📍 *Участок:* {request['plot']}\n"
-        f"⏰ *Срочность:* {request['urgency']}\n"
-        f"📝 *Описание:* {request['problem'][:200]}...\n"
-        f"👨‍💼 *Исполнитель:* {request.get('assigned_admin', 'Не назначен')}\n"
-        f"🕒 *Создана:* {request['created_at'][:16]}\n"
-        f"💬 *Комментарий:* {request.get('admin_comment', 'Нет комментария')}"
-    )
-
-def format_detailed_request_text(request: Dict, comments: List[Dict]) -> str:
-    """Форматирует детальный текст заявки с комментариями"""
-    base_text = format_request_text(request)
-    
-    comments_text = "\n\n💬 *История комментариев:*\n"
-    if comments:
-        for comment in comments:
-            comments_text += f"\n👤 {comment['admin_name']} ({comment['created_at'][:16]}):\n{comment['comment']}\n"
-    else:
-        comments_text += "\n📭 Комментариев пока нет"
-    
-    return base_text + comments_text
 
 # ==================== ОБРАБОТКА КОММЕНТАРИЕВ ====================
 
@@ -640,13 +617,7 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
     
     else:
         await update.message.reply_text(
-            "❌ Нет активного процесса комментария. Используйте кнопки в заявке.",
-            reply_markup=ReplyKeyboardMarkup(
-                super_admin_main_menu_keyboard if Config.is_super_admin(user_id) else
-                admin_main_menu_keyboard if Config.is_admin(user_id) else
-                user_main_menu_keyboard, 
-                resize_keyboard=True
-            )
+            "❌ Нет активного процесса комментария. Используйте кнопки в заявке."
         )
 
 async def process_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, admin_id: int, comment: str, is_completion: bool = False):
@@ -695,17 +666,11 @@ async def process_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, re
         
         await update.message.reply_text(
             success_message,
-            reply_markup=ReplyKeyboardMarkup(
-                super_admin_main_menu_keyboard if Config.is_super_admin(admin_id) else
-                admin_main_menu_keyboard if Config.is_admin(admin_id) else
-                user_main_menu_keyboard, 
-                resize_keyboard=True
-            ),
             parse_mode=ParseMode.MARKDOWN
         )
         
     except Exception as e:
-        logger.error(f"Ошибка обработки комментария: {e}")
+        logger.error(f"❌ Ошибка обработки комментария: {e}")
         await update.message.reply_text("❌ Ошибка при обработке комментария")
 
 async def notify_admins_about_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, admin_name: str, comment: str):
@@ -736,12 +701,112 @@ async def notify_admins_about_comment(update: Update, context: ContextTypes.DEFA
                         parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+                    logger.error(f"❌ Ошибка отправки уведомления админу {admin_id}: {e}")
                     
     except Exception as e:
-        logger.error(f"Ошибка уведомления админов о комментарии: {e}")
+        logger.error(f"❌ Ошибка уведомления админов о комментарии: {e}")
 
-# ==================== ОБНОВЛЕННЫЕ ФУНКЦИИ ПОКАЗА ЗАЯВОК ====================
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start"""
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.id} запустил бота")
+    
+    welcome_text = (
+        "👋 *Добро пожаловать в систему заявок!*\n\n"
+        "🛠️ *Мы поможем с:*\n"
+        "• 💻 IT проблемами\n"
+        "• 🔧 Механическими неисправностями\n"
+        "• ⚡ Электрическими вопросами\n\n"
+        "🎯 *Выберите действие из меню ниже:*"
+    )
+    
+    if Config.is_super_admin(user.id):
+        keyboard = super_admin_main_menu_keyboard
+    elif Config.is_admin(user.id):
+        keyboard = admin_main_menu_keyboard
+    else:
+        keyboard = user_main_menu_keyboard
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает главное меню"""
+    user = update.message.from_user
+    user_id = user.id
+    
+    if Config.is_super_admin(user_id):
+        keyboard = super_admin_main_menu_keyboard
+        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР!*"
+    elif Config.is_admin(user_id):
+        keyboard = admin_main_menu_keyboard
+        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР!*"
+    else:
+        keyboard = user_main_menu_keyboard
+        welcome_text = "💼 *Добро пожаловать в сервис заявок!*"
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ==================== КЛАВИАТУРЫ ====================
+
+# 🎯 Главное меню пользователя
+user_main_menu_keyboard = [
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', 'ℹ️ Помощь'],
+    ['🔙 Главное меню']
+]
+
+# 👑 Главное меню администратора
+admin_main_menu_keyboard = [
+    ['👑 Админ-панель', '📊 Статистика'],
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
+    ['🔙 Главное меню']
+]
+
+# 👑 Главное меню супер-администратора
+super_admin_main_menu_keyboard = [
+    ['👑 Супер-админ', '📊 Статистика'],
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
+    ['🔙 Главное меню']
+]
+
+# 🏢 Админ-панели по отделам
+it_admin_panel_keyboard = [
+    ['🆕 Новые заявки IT', '🔄 В работе IT'],
+    ['✅ Выполненные IT', '📊 Статистика IT'],
+    ['🔙 Главное меню']
+]
+
+mechanics_admin_panel_keyboard = [
+    ['🆕 Новые заявки механики', '🔄 В работе механики'],
+    ['✅ Выполненные механики', '📊 Статистика механики'],
+    ['🔙 Главное меню']
+]
+
+electricity_admin_panel_keyboard = [
+    ['🆕 Новые заявки электрики', '🔄 В работе электрики'],
+    ['✅ Выполненные электрики', '📊 Статистика электрики'],
+    ['🔙 Главное меню']
+]
+
+# 🏢 Выбор отдела
+department_keyboard = [
+    ['💻 IT отдел', '🔧 Механика'],
+    ['⚡ Электрика', '🔙 Назад в меню']
+]
+
+# ==================== ПОКАЗ ЗАЯВОК С INLINE КНОПКАМИ ====================
 
 async def show_new_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает новые заявки отдела с inline кнопками"""
@@ -845,7 +910,7 @@ async def show_requests_in_progress(update: Update, context: ContextTypes.DEFAUL
         parse_mode=ParseMode.MARKDOWN
     )
     
-    for request in requests[:10]:  # Ограничиваем вывод
+    for request in requests[:10]:
         request_text = format_request_text(request)
         keyboard = create_request_actions_keyboard(request['id'])
         
@@ -855,53 +920,91 @@ async def show_requests_in_progress(update: Update, context: ContextTypes.DEFAUL
             parse_mode=ParseMode.MARKDOWN
         )
 
-# ==================== ИСПРАВЛЕННЫЙ ОБРАБОТЧИК ГЛАВНОГО МЕНЮ ====================
+# ==================== УВЕДОМЛЕНИЯ ====================
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает главное меню"""
-    user = update.message.from_user
-    user_id = user.id
+async def notify_user_about_request_status(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
+    """Уведомляет пользователя об изменении статуса заявки"""
+    try:
+        request = db.get_request(request_id)
+        if not request:
+            return
+        
+        user_id = request['user_id']
+        
+        if status == 'in_progress':
+            message_text = (
+                f"🔄 *Ваша заявка взята в работу!*\n\n"
+                f"📋 *Заявка #{request_id}*\n"
+                f"🏢 *Отдел:* {request['department']}\n"
+                f"🔧 *Тип:* {request['system_type']}\n"
+                f"👨‍💼 *Исполнитель:* {assigned_admin or 'Администратор'}\n"
+                f"💬 *Комментарий:* {admin_comment or 'Без комментария'}\n\n"
+                f"_Заявка будет выполнена в течение 48 часов_"
+            )
+        elif status == 'completed':
+            message_text = (
+                f"✅ *Ваша заявка выполнена!*\n\n"
+                f"📋 *Заявка #{request_id}*\n"
+                f"🏢 *Отдел:* {request['department']}\n"
+                f"🔧 *Тип:* {request['system_type']}\n"
+                f"👨‍💼 *Исполнитель:* {assigned_admin or 'Администратор'}\n"
+                f"💬 *Комментарий:* {admin_comment or 'Без комментария'}\n\n"
+                f"_Спасибо за обращение!_ 💼"
+            )
+        else:
+            return
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        logger.info(f"✅ Уведомление отправлено пользователю {user_id} о заявке #{request_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления пользователю о заявке #{request_id}: {e}")
+
+# ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
+
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик текстовых сообщений для меню"""
+    text = update.message.text
+    user_id = update.message.from_user.id
     
-    if Config.is_super_admin(user_id):
-        keyboard = super_admin_main_menu_keyboard
-        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР завода Контакт!*"
-    elif Config.is_admin(user_id):
-        keyboard = admin_main_menu_keyboard
-        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР завода Контакт!*"
+    # Обработка основных кнопок меню
+    if text == '🎯 Создать заявку':
+        await start_request_creation(update, context)
+    elif text == '📂 Мои заявки':
+        await show_my_requests(update, context)
+    elif text == '🔍 Поиск заявки':
+        await search_requests_menu(update, context)
+    elif text == '📊 Статистика':
+        await show_user_statistics(update, context)
+    elif text == '🔄 Заявки в работе':
+        await show_requests_in_progress(update, context)
+    elif text == 'ℹ️ Помощь':
+        await show_help(update, context)
+    elif text == '👑 Админ-панель':
+        await show_admin_panel(update, context)
+    elif text == '👑 Супер-админ':
+        await show_super_admin_panel(update, context)
+    elif text == '🔙 Главное меню':
+        await show_main_menu(update, context)
+    
+    # Обработка кнопок новых заявок
+    elif text in ['🆕 Новые заявки IT', '🆕 Новые заявки механики', '🆕 Новые заявки электрики']:
+        await show_new_requests(update, context)
+    
     else:
-        keyboard = user_main_menu_keyboard
-        welcome_text = "💼 *Добро пожаловать в сервис заявок завода Контакт!*"
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# ==================== ОБНОВЛЕННАЯ КОНФИГУРАЦИЯ КЛАВИАТУР ====================
-
-# 🎯 Главное меню пользователя
-user_main_menu_keyboard = [
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', 'ℹ️ Помощь'],
-    ['🔙 Главное меню']
-]
-
-# 👑 Главное меню администратора
-admin_main_menu_keyboard = [
-    ['👑 Админ-панель', '📊 Статистика'],
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
-    ['🔙 Главное меню']
-]
-
-# 👑 Главное меню супер-администратора
-super_admin_main_menu_keyboard = [
-    ['👑 Супер-админ', '📊 Статистика'],
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
-    ['🔙 Главное меню']
-]
+        await update.message.reply_text(
+            "Используйте кнопки меню для навигации",
+            reply_markup=ReplyKeyboardMarkup(
+                super_admin_main_menu_keyboard if Config.is_super_admin(user_id) else
+                admin_main_menu_keyboard if Config.is_admin(user_id) else
+                user_main_menu_keyboard, 
+                resize_keyboard=True
+            )
+        )
 
 # ==================== ЗАПУСК БОТА ====================
 
@@ -924,44 +1027,16 @@ def main() -> None:
         
         # Обработчик комментариев админов
         application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Regex(r'^(?!🎯|📂|🔍|ℹ️|👑|📊|🔄|🔙)'),
+            filters.TEXT & ~filters.COMMAND,
             handle_admin_comment
         ))
         
         # Обработчики текстовых сообщений для меню
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
         
-        # Обработчик создания заявки
-        conv_handler = ConversationHandler(
-            entry_points=[
-                MessageHandler(filters.Regex('^(🎯 Создать заявку)$'), start_request_creation),
-            ],
-            states={
-                NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
-                PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
-                DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, department)],
-                SYSTEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, system_type)],
-                PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plot)],
-                OTHER_PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, other_plot)],
-                PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, problem)],
-                URGENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, urgency)],
-                PHOTO: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, photo),
-                    MessageHandler(filters.PHOTO, photo)
-                ],
-            },
-            fallbacks=[
-                CommandHandler('cancel', cancel_request),
-                MessageHandler(filters.Regex('^(🔙 Главное меню|🔙 Отменить)$'), cancel_request),
-            ],
-        )
-        
-        application.add_handler(conv_handler)
-        
-        logger.info("🤖 Бот заявок завода Контакт запущен!")
-        print("✅ Бот успешно запущен с новыми функциями!")
+        logger.info("🤖 Бот заявок успешно запущен!")
+        print("✅ Бот успешно запущен!")
         print("🎯 Новые возможности:")
-        print("   • 📊 Интеграция с Google Sheets для каждого отдела")
         print("   • 🔘 Визуальные кнопки для управления заявками") 
         print("   • 💬 Система комментариев для админов")
         print("   • ✅ Улучшенный интерфейс управления")
