@@ -87,6 +87,27 @@ class Config:
         """Получает список админов для отдела"""
         return cls.ADMIN_CHAT_IDS.get(department, [])
 
+# ==================== ВАЛИДАЦИЯ ====================
+
+class Validators:
+    """Класс для валидации данных"""
+    
+    @staticmethod
+    def validate_phone(phone: str) -> bool:
+        """Проверяет валидность номера телефона"""
+        pattern = r'^(\+7|7|8)?[\s\-]?\(?[489][0-9]{2}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}$'
+        return bool(re.match(pattern, phone.strip()))
+    
+    @staticmethod
+    def validate_name(name: str) -> bool:
+        """Проверяет валидность имени"""
+        return len(name.strip()) >= 2 and len(name.strip()) <= 50 and name.replace(' ', '').isalpha()
+    
+    @staticmethod
+    def validate_problem(problem: str) -> bool:
+        """Проверяет валидность описания проблемы"""
+        return 10 <= len(problem.strip()) <= 1000
+
 # ==================== БАЗА ДАННЫХ ====================
 
 class Database:
@@ -324,6 +345,116 @@ class Database:
 # Инициализация базы данных
 db = Database(Config.DB_PATH)
 
+# ==================== ОПРЕДЕЛЕНИЕ ЭТАПОВ РАЗГОВОРА ====================
+
+NAME, PHONE, DEPARTMENT, PLOT, PROBLEM, SYSTEM_TYPE, PHOTO, URGENCY, EDIT_CHOICE, EDIT_FIELD, OTHER_PLOT, SELECT_REQUEST = range(12)
+
+# ==================== КЛАВИАТУРЫ ====================
+
+# 🎯 Главное меню пользователя
+user_main_menu_keyboard = [
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', 'ℹ️ Помощь'],
+    ['🔙 Главное меню']
+]
+
+# 👑 Главное меню администратора
+admin_main_menu_keyboard = [
+    ['👑 Админ-панель', '📊 Статистика'],
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
+    ['🔙 Главное меню']
+]
+
+# 👑 Главное меню супер-администратора
+super_admin_main_menu_keyboard = [
+    ['👑 Супер-админ', '📊 Статистика'],
+    ['🎯 Создать заявку', '📂 Мои заявки'],
+    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
+    ['🔙 Главное меню']
+]
+
+# 🏢 Админ-панели по отделам
+it_admin_panel_keyboard = [
+    ['🆕 Новые заявки IT', '🔄 В работе IT'],
+    ['✅ Выполненные IT', '📊 Статистика IT'],
+    ['🔙 Главное меню']
+]
+
+mechanics_admin_panel_keyboard = [
+    ['🆕 Новые заявки механики', '🔄 В работе механики'],
+    ['✅ Выполненные механики', '📊 Статистика механики'],
+    ['🔙 Главное меню']
+]
+
+electricity_admin_panel_keyboard = [
+    ['🆕 Новые заявки электрики', '🔄 В работе электрики'],
+    ['✅ Выполненные электрики', '📊 Статистика электрики'],
+    ['🔙 Главное меню']
+]
+
+# 🏢 Выбор отдела
+department_keyboard = [
+    ['💻 IT отдел', '🔧 Механика'],
+    ['⚡ Электрика', '🔙 Назад в меню']
+]
+
+# ◀️ Клавиатура назад
+back_keyboard = [['🔙 Назад']]
+
+# 📸 Клавиатура для фото
+photo_keyboard = [
+    ['📷 Добавить фото', '⏭️ Без фото'],
+    ['🔙 Назад']
+]
+
+# ⏰ Клавиатура срочности
+urgency_keyboard = [
+    ['🔥 СРОЧНО (1-2 часа)'],
+    ['⚠️ СЕГОДНЯ (до конца дня)'],
+    ['💤 НЕ СРОЧНО (1-3 дня)'],
+    ['🔙 Назад']
+]
+
+# 🏢 Типы участков
+plot_type_keyboard = [
+    ['🏢 Центральный офис', '🏭 Производство'],
+    ['📦 Складской комплекс', '🛒 Торговый зал'],
+    ['💻 Удаленные рабочие места', '📋 Другой участок'],
+    ['🔙 Назад']
+]
+
+# 💻 Типы IT систем
+it_systems_keyboard = [
+    ['💻 Компьютеры', '🖨️ Принтеры'],
+    ['🌐 Интернет', '📞 Телефония'],
+    ['🔐 Программы', '📊 1С и Базы'],
+    ['🎥 Оборудование', '⚡ Другое'],
+    ['🔙 Назад к выбору отдела']
+]
+
+# 🔧 Типы проблем для механики
+mechanics_keyboard = [
+    ['🔩 Станки и оборудование', '🛠️ Ручной инструмент'],
+    ['⚙️ Гидравлика/Пневматика', '🔧 Техническое обслуживание'],
+    ['🚗 Транспортные средства', '🏗️ Производственные линии'],
+    ['⚡ Другое (механика)', '🔙 Назад к выбору отдела']
+]
+
+# ⚡ Типы проблем для электрики
+electricity_keyboard = [
+    ['💡 Освещение', '🔌 Электропроводка'],
+    ['⚡ Электрощитовое', '🔋 Источники питания'],
+    ['🎛️ Автоматика и КИП', '🛑 Аварийные системы'],
+    ['🔧 Другое (электрика)', '🔙 Назад к выбору отдела']
+]
+
+# ✅ Клавиатура подтверждения
+confirm_keyboard = [
+    ['🚀 Отправить заявку', '✏️ Исправить'],
+    ['🔙 Отменить']
+]
+
 # ==================== ВИЗУАЛЬНЫЕ КНОПКИ ====================
 
 def create_request_actions_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -386,6 +517,649 @@ def format_detailed_request_text(request: Dict, comments: List[Dict]) -> str:
         comments_text += "\n📭 Комментариев пока нет"
     
     return base_text + comments_text
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start"""
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.id} запустил бота")
+    
+    welcome_text = (
+        "👋 *Добро пожаловать в систему заявок!*\n\n"
+        "🛠️ *Мы поможем с:*\n"
+        "• 💻 IT проблемами\n"
+        "• 🔧 Механическими неисправностями\n"
+        "• ⚡ Электрическими вопросами\n\n"
+        "🎯 *Выберите действие из меню ниже:*"
+    )
+    
+    if Config.is_super_admin(user.id):
+        keyboard = super_admin_main_menu_keyboard
+    elif Config.is_admin(user.id):
+        keyboard = admin_main_menu_keyboard
+    else:
+        keyboard = user_main_menu_keyboard
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает главное меню"""
+    user = update.message.from_user
+    user_id = user.id
+    
+    if Config.is_super_admin(user_id):
+        keyboard = super_admin_main_menu_keyboard
+        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР!*"
+    elif Config.is_admin(user_id):
+        keyboard = admin_main_menu_keyboard
+        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР!*"
+    else:
+        keyboard = user_main_menu_keyboard
+        welcome_text = "💼 *Добро пожаловать в сервис заявок!*"
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает справку"""
+    help_text = (
+        "💼 *Помощь по боту заявок*\n\n"
+        "🎯 *Основные команды:*\n"
+        "/start - начать работу\n"
+        "/menu - главное меню\n" 
+        "/help - эта справка\n\n"
+        "📞 *Контакты поддержки:*\n"
+        "По техническим вопросам обращайтесь к администратору"
+    )
+    
+    await update.message.reply_text(
+        help_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает админ-панель"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к админ-панели.")
+        return
+    
+    await update.message.reply_text(
+        "👑 *АДМИН-ПАНЕЛЬ*\n\n"
+        "Выберите отдел для управления:",
+        reply_markup=ReplyKeyboardMarkup([
+            ['💻 IT админ-панель', '🔧 Механика админ-панель'],
+            ['⚡ Электрика админ-панель', '🔙 Главное меню']
+        ], resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_super_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает панель супер-администратора"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к панели супер-администратора.")
+        return
+    
+    await update.message.reply_text(
+        "👑 *ПАНЕЛЬ СУПЕР-АДМИНИСТРАТОРА*\n\n"
+        "Доступные функции:",
+        reply_markup=ReplyKeyboardMarkup([
+            ['📢 Массовая рассылка', '👥 Управление админами'],
+            ['🏢 Все заявки', '📈 Общая статистика'],
+            ['💾 Создать бэкап', '🔙 Главное меню']
+        ], resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_user_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает персональную статистику пользователя"""
+    user_id = update.message.from_user.id
+    
+    stats_text = (
+        "📊 *ВАША СТАТИСТИКА*\n\n"
+        "📈 *Всего заявок:* 0\n"
+        "✅ *Выполнено:* 0\n"
+        "🔄 *В работе:* 0\n"
+        "📊 *Процент выполнения:* 0%\n\n"
+        "💡 Создайте первую заявку! 🎯"
+    )
+    
+    await update.message.reply_text(
+        stats_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает заявки пользователя"""
+    user_id = update.message.from_user.id
+    requests = db.get_user_requests(user_id)
+    
+    if not requests:
+        await update.message.reply_text(
+            "📭 *У вас пока нет заявок*\n\n"
+            "Создайте первую заявку, нажав кнопку '🎯 Создать заявку'",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    for request in requests[:5]:  # Показываем последние 5 заявок
+        status_emoji = {
+            'new': '🆕',
+            'in_progress': '🔄', 
+            'completed': '✅'
+        }.get(request['status'], '❓')
+        
+        request_text = (
+            f"📋 *Заявка #{request['id']}*\n"
+            f"{status_emoji} *Статус:* {request['status']}\n"
+            f"🏢 *Отдел:* {request['department']}\n"
+            f"🔧 *Тип:* {request['system_type']}\n"
+            f"📍 *Участок:* {request['plot']}\n"
+            f"⏰ *Срочность:* {request['urgency']}\n"
+            f"📝 *Описание:* {request['problem'][:100]}...\n"
+            f"🕒 *Создана:* {request['created_at'][:16]}"
+        )
+        
+        await update.message.reply_text(
+            request_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def search_requests_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает меню поиска заявок"""
+    await update.message.reply_text(
+        "🔍 *Поиск заявок*\n\n"
+        "Функция поиска в разработке...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# ==================== ОБРАБОТКА СОЗДАНИЯ ЗАЯВКИ ====================
+
+async def start_request_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает процесс создания заявки"""
+    user = update.message.from_user
+    logger.info(f"Пользователь {user.id} начал создание заявки")
+    
+    # Инициализируем данные пользователя
+    context.user_data['user_id'] = user.id
+    context.user_data['username'] = user.username
+    context.user_data['first_name'] = user.first_name
+    context.user_data['last_name'] = user.last_name
+    
+    await update.message.reply_text(
+        "🎯 *Создание новой заявки*\n\n"
+        "👤 *Шаг 1 из 8: Введите ваше ФИО*\n\n"
+        "💡 Пример: *Иванов Иван Иванович*",
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return NAME
+
+async def name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает ввод имени"""
+    if update.message.text == '🔙 Назад':
+        await cancel_request(update, context)
+        return ConversationHandler.END
+    
+    name = update.message.text.strip()
+    
+    if not Validators.validate_name(name):
+        await update.message.reply_text(
+            "❌ *Неверный формат имени!*\n\n"
+            "👤 Пожалуйста, введите ваше ФИО (только буквы и пробелы, от 2 до 50 символов):\n\n"
+            "💡 Пример: *Иванов Иван Иванович*",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return NAME
+    
+    context.user_data['name'] = name
+    
+    await update.message.reply_text(
+        "📞 *Шаг 2 из 8: Введите ваш номер телефона*\n\n"
+        "💡 Пример: *+7 999 123-45-67* или *89991234567*",
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PHONE
+
+async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает ввод телефона"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('name', None)
+        await update.message.reply_text(
+            "👤 Введите ваше ФИО:",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True)
+        )
+        return NAME
+    
+    phone = update.message.text.strip()
+    
+    if not Validators.validate_phone(phone):
+        await update.message.reply_text(
+            "❌ *Неверный формат телефона!*\n\n"
+            "📞 Пожалуйста, введите корректный номер телефона:\n\n"
+            "💡 Пример: *+7 999 123-45-67* или *89991234567*",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return PHONE
+    
+    context.user_data['phone'] = phone
+    
+    await update.message.reply_text(
+        "🏢 *Шаг 3 из 8: Выберите отдел*\n\n"
+        "💻 *IT отдел* - компьютеры, программы, сети\n"
+        "🔧 *Механика* - станки, оборудование, инструмент\n"
+        "⚡ *Электрика* - проводка, освещение, электрощиты",
+        reply_markup=ReplyKeyboardMarkup(department_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return DEPARTMENT
+
+async def department(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор отдела"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('phone', None)
+        await update.message.reply_text(
+            "📞 Введите ваш номер телефона:",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True)
+        )
+        return PHONE
+    
+    if update.message.text == '🔙 Назад в меню':
+        await cancel_request(update, context)
+        return ConversationHandler.END
+    
+    valid_departments = ['💻 IT отдел', '🔧 Механика', '⚡ Электрика']
+    if update.message.text not in valid_departments:
+        await update.message.reply_text(
+            "❌ Пожалуйста, выберите отдел из предложенных вариантов:",
+            reply_markup=ReplyKeyboardMarkup(department_keyboard, resize_keyboard=True)
+        )
+        return DEPARTMENT
+    
+    context.user_data['department'] = update.message.text
+    
+    # Показываем соответствующую клавиатуру для типа проблемы
+    if update.message.text == '💻 IT отдел':
+        await update.message.reply_text(
+            "💻 *Шаг 4 из 8: Выберите тип IT проблемы*",
+            reply_markup=ReplyKeyboardMarkup(it_systems_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    elif update.message.text == '🔧 Механика':
+        await update.message.reply_text(
+            "🔧 *Шаг 4 из 8: Выберите тип механической проблемы*",
+            reply_markup=ReplyKeyboardMarkup(mechanics_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    elif update.message.text == '⚡ Электрика':
+        await update.message.reply_text(
+            "⚡ *Шаг 4 из 8: Выберите тип электрической проблемы*",
+            reply_markup=ReplyKeyboardMarkup(electricity_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    return SYSTEM_TYPE
+
+async def system_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор типа проблемы"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('department', None)
+        await update.message.reply_text(
+            "🏢 Выберите отдел:",
+            reply_markup=ReplyKeyboardMarkup(department_keyboard, resize_keyboard=True)
+        )
+        return DEPARTMENT
+    
+    if update.message.text == '🔙 Назад к выбору отдела':
+        await department(update, context)
+        return DEPARTMENT
+    
+    context.user_data['system_type'] = update.message.text
+    
+    await update.message.reply_text(
+        "📍 *Шаг 5 из 8: Выберите участок*",
+        reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PLOT
+
+async def plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор участка"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('system_type', None)
+        await update.message.reply_text(
+            f"🔧 Выберите тип проблемы для {context.user_data.get('department')}:",
+            reply_markup=ReplyKeyboardMarkup(
+                it_systems_keyboard if context.user_data.get('department') == '💻 IT отдел' else
+                mechanics_keyboard if context.user_data.get('department') == '🔧 Механика' else
+                electricity_keyboard,
+                resize_keyboard=True
+            )
+        )
+        return SYSTEM_TYPE
+    
+    if update.message.text == '📋 Другой участок':
+        await update.message.reply_text(
+            "📍 *Введите название вашего участка:*\n\n"
+            "💡 Пример: *Цех №5, Склад запчастей, Офис бухгалтерии*",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return OTHER_PLOT
+    
+    valid_plots = ['🏢 Центральный офис', '🏭 Производство', '📦 Складской комплекс', '🛒 Торговый зал', '💻 Удаленные рабочие места']
+    if update.message.text not in valid_plots:
+        await update.message.reply_text(
+            "❌ Пожалуйста, выберите участок из предложенных вариантов:",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+        )
+        return PLOT
+    
+    context.user_data['plot'] = update.message.text
+    
+    await update.message.reply_text(
+        "📝 *Шаг 6 из 8: Опишите проблему*\n\n"
+        "✍️ *Подробно опишите что случилось:*\n\n"
+        "⚠️ *Минимум 10 символов, максимум 1000*",
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PROBLEM
+
+async def other_plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает ввод другого участка"""
+    if update.message.text == '🔙 Назад':
+        await update.message.reply_text(
+            "📍 Выберите участок:",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+        )
+        return PLOT
+    
+    plot_name = update.message.text.strip()
+    if len(plot_name) < 2 or len(plot_name) > 100:
+        await update.message.reply_text(
+            "❌ *Название участка должно быть от 2 до 100 символов*\n\n"
+            "📍 Введите название участка:",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return OTHER_PLOT
+    
+    context.user_data['plot'] = f"📋 {plot_name}"
+    
+    await update.message.reply_text(
+        "📝 *Шаг 6 из 8: Опишите проблему*\n\n"
+        "✍️ Подробно опишите что случилось:",
+        reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PROBLEM
+
+async def problem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает ввод описания проблемы"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('plot', None)
+        await update.message.reply_text(
+            "📍 Выберите участок:",
+            reply_markup=ReplyKeyboardMarkup(plot_type_keyboard, resize_keyboard=True)
+        )
+        return PLOT
+    
+    problem_text = update.message.text.strip()
+    
+    if not Validators.validate_problem(problem_text):
+        await update.message.reply_text(
+            "❌ *Описание проблемы слишком короткое или длинное!*\n\n"
+            "📝 Пожалуйста, опишите проблему подробно (от 10 до 1000 символов):",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return PROBLEM
+    
+    context.user_data['problem'] = problem_text
+    
+    await update.message.reply_text(
+        "⏰ *Шаг 7 из 8: Выберите срочность*",
+        reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return URGENCY
+
+async def urgency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор срочности"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('problem', None)
+        await update.message.reply_text(
+            "📝 Опишите проблему:",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True)
+        )
+        return PROBLEM
+    
+    valid_urgency = ['🔥 СРОЧНО (1-2 часа)', '⚠️ СЕГОДНЯ (до конца дня)', '💤 НЕ СРОЧНО (1-3 дня)']
+    if update.message.text not in valid_urgency:
+        await update.message.reply_text(
+            "❌ Пожалуйста, выберите срочность из предложенных вариантов:",
+            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True)
+        )
+        return URGENCY
+    
+    context.user_data['urgency'] = update.message.text
+    
+    await update.message.reply_text(
+        "📸 *Шаг 8 из 8: Добавить фото*",
+        reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return PHOTO
+
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает добавление фото или пропуск"""
+    if update.message.text == '🔙 Назад':
+        context.user_data.pop('urgency', None)
+        await update.message.reply_text(
+            "⏰ Выберите срочность:",
+            reply_markup=ReplyKeyboardMarkup(urgency_keyboard, resize_keyboard=True)
+        )
+        return URGENCY
+    
+    if update.message.text == '⏭️ Без фото':
+        context.user_data['photo'] = None
+        return await show_request_summary(update, context)
+    
+    if update.message.text == '📷 Добавить фото':
+        await update.message.reply_text(
+            "📸 *Отправьте фото проблемы:*",
+            reply_markup=ReplyKeyboardMarkup(back_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return PHOTO
+    
+    if update.message.photo:
+        # Сохраняем самое большое фото
+        photo_file = await update.message.photo[-1].get_file()
+        photo_path = f"photos/photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{update.message.from_user.id}.jpg"
+        
+        # Создаем папку если нет
+        os.makedirs('photos', exist_ok=True)
+        
+        await photo_file.download_to_drive(photo_path)
+        context.user_data['photo'] = photo_path
+        return await show_request_summary(update, context)
+    
+    await update.message.reply_text(
+        "❌ Пожалуйста, отправьте фото или выберите действие:",
+        reply_markup=ReplyKeyboardMarkup(photo_keyboard, resize_keyboard=True)
+    )
+    return PHOTO
+
+async def show_request_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показывает сводку заявки для подтверждения"""
+    user_data = context.user_data
+    
+    summary_text = (
+        "📋 *ПРОВЕРЬТЕ ДАННЫЕ ЗАЯВКИ*\n\n"
+        f"👤 *ФИО:* {user_data.get('name')}\n"
+        f"📞 *Телефон:* {user_data.get('phone')}\n"
+        f"🏢 *Отдел:* {user_data.get('department')}\n"
+        f"🔧 *Тип проблемы:* {user_data.get('system_type')}\n"
+        f"📍 *Участок:* {user_data.get('plot')}\n"
+        f"⏰ *Срочность:* {user_data.get('urgency')}\n"
+        f"📝 *Описание:* {user_data.get('problem')}\n"
+        f"📷 *Фото:* {'✅ Есть' if user_data.get('photo') else '❌ Нет'}\n\n"
+        "✅ *Всё верно?*"
+    )
+    
+    if user_data.get('photo'):
+        try:
+            with open(user_data['photo'], 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=summary_text,
+                    reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото: {e}")
+            await update.message.reply_text(
+                summary_text,
+                reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+    else:
+        await update.message.reply_text(
+            summary_text,
+            reply_markup=ReplyKeyboardMarkup(confirm_keyboard, resize_keyboard=True),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    return ConversationHandler.END
+
+async def confirm_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Подтверждает и сохраняет заявку"""
+    if update.message.text == '✏️ Исправить':
+        await update.message.reply_text(
+            "✏️ *Редактирование заявки*\n\n"
+            "Начните создание заявки заново",
+            reply_markup=ReplyKeyboardMarkup(
+                super_admin_main_menu_keyboard if Config.is_super_admin(update.message.from_user.id) else
+                admin_main_menu_keyboard if Config.is_admin(update.message.from_user.id) else
+                user_main_menu_keyboard, 
+                resize_keyboard=True
+            )
+        )
+        return
+    
+    if update.message.text != '🚀 Отправить заявку':
+        return
+    
+    try:
+        # Сохраняем заявку в базу
+        request_id = db.save_request(context.user_data)
+        
+        # Отправляем уведомление администраторам
+        department = context.user_data.get('department')
+        admin_ids = Config.get_admins_for_department(department)
+        
+        request_text = (
+            f"🆕 *НОВАЯ ЗАЯВКА #{request_id}*\n\n"
+            f"👤 *ФИО:* {context.user_data.get('name')}\n"
+            f"📞 *Телефон:* {context.user_data.get('phone')}\n"
+            f"🏢 *Отдел:* {department}\n"
+            f"🔧 *Тип проблемы:* {context.user_data.get('system_type')}\n"
+            f"📍 *Участок:* {context.user_data.get('plot')}\n"
+            f"⏰ *Срочность:* {context.user_data.get('urgency')}\n"
+            f"📝 *Описание:* {context.user_data.get('problem')}\n\n"
+            f"🕒 *Создана:* {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        # Отправляем администраторам
+        for admin_id in admin_ids:
+            try:
+                if context.user_data.get('photo'):
+                    with open(context.user_data['photo'], 'rb') as photo:
+                        await context.bot.send_photo(
+                            chat_id=admin_id,
+                            photo=photo,
+                            caption=request_text,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                else:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=request_text,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+        
+        # Подтверждение пользователю
+        success_text = (
+            f"✅ *Заявка #{request_id} успешно создана!*\n\n"
+            f"🏢 *Отдел:* {department}\n"
+            f"⏰ *Срочность:* {context.user_data.get('urgency')}\n"
+            f"📞 *Ваш телефон:* {context.user_data.get('phone')}\n\n"
+            f"💡 *Статус заявки можно отслеживать в разделе '📂 Мои заявки'*"
+        )
+        
+        await update.message.reply_text(
+            success_text,
+            reply_markup=ReplyKeyboardMarkup(
+                super_admin_main_menu_keyboard if Config.is_super_admin(update.message.from_user.id) else
+                admin_main_menu_keyboard if Config.is_admin(update.message.from_user.id) else
+                user_main_menu_keyboard, 
+                resize_keyboard=True
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Очищаем данные
+        context.user_data.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания заявки: {e}")
+        await update.message.reply_text(
+            "❌ *Произошла ошибка при создании заявки*\n\n"
+            "Пожалуйста, попробуйте позже или обратитесь к администратору.",
+            reply_markup=ReplyKeyboardMarkup(
+                super_admin_main_menu_keyboard if Config.is_super_admin(update.message.from_user.id) else
+                admin_main_menu_keyboard if Config.is_admin(update.message.from_user.id) else
+                user_main_menu_keyboard, 
+                resize_keyboard=True
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет создание заявки"""
+    user_id = update.message.from_user.id
+    
+    # Очищаем временные данные
+    context.user_data.clear()
+    
+    await update.message.reply_text(
+        "❌ Создание заявки отменено",
+        reply_markup=ReplyKeyboardMarkup(
+            super_admin_main_menu_keyboard if Config.is_super_admin(user_id) else
+            admin_main_menu_keyboard if Config.is_admin(user_id) else
+            user_main_menu_keyboard, 
+            resize_keyboard=True
+        )
+    )
+    return ConversationHandler.END
 
 # ==================== ОБРАБОТЧИКИ INLINE КНОПОК ====================
 
@@ -706,106 +1480,6 @@ async def notify_admins_about_comment(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.error(f"❌ Ошибка уведомления админов о комментарии: {e}")
 
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start"""
-    user = update.message.from_user
-    logger.info(f"Пользователь {user.id} запустил бота")
-    
-    welcome_text = (
-        "👋 *Добро пожаловать в систему заявок!*\n\n"
-        "🛠️ *Мы поможем с:*\n"
-        "• 💻 IT проблемами\n"
-        "• 🔧 Механическими неисправностями\n"
-        "• ⚡ Электрическими вопросами\n\n"
-        "🎯 *Выберите действие из меню ниже:*"
-    )
-    
-    if Config.is_super_admin(user.id):
-        keyboard = super_admin_main_menu_keyboard
-    elif Config.is_admin(user.id):
-        keyboard = admin_main_menu_keyboard
-    else:
-        keyboard = user_main_menu_keyboard
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает главное меню"""
-    user = update.message.from_user
-    user_id = user.id
-    
-    if Config.is_super_admin(user_id):
-        keyboard = super_admin_main_menu_keyboard
-        welcome_text = "👑 *Добро пожаловать, СУПЕР-АДМИНИСТРАТОР!*"
-    elif Config.is_admin(user_id):
-        keyboard = admin_main_menu_keyboard
-        welcome_text = "👨‍💼 *Добро пожаловать, АДМИНИСТРАТОР!*"
-    else:
-        keyboard = user_main_menu_keyboard
-        welcome_text = "💼 *Добро пожаловать в сервис заявок!*"
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# ==================== КЛАВИАТУРЫ ====================
-
-# 🎯 Главное меню пользователя
-user_main_menu_keyboard = [
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', 'ℹ️ Помощь'],
-    ['🔙 Главное меню']
-]
-
-# 👑 Главное меню администратора
-admin_main_menu_keyboard = [
-    ['👑 Админ-панель', '📊 Статистика'],
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
-    ['🔙 Главное меню']
-]
-
-# 👑 Главное меню супер-администратора
-super_admin_main_menu_keyboard = [
-    ['👑 Супер-админ', '📊 Статистика'],
-    ['🎯 Создать заявку', '📂 Мои заявки'],
-    ['🔍 Поиск заявки', '🔄 Заявки в работе'],
-    ['🔙 Главное меню']
-]
-
-# 🏢 Админ-панели по отделам
-it_admin_panel_keyboard = [
-    ['🆕 Новые заявки IT', '🔄 В работе IT'],
-    ['✅ Выполненные IT', '📊 Статистика IT'],
-    ['🔙 Главное меню']
-]
-
-mechanics_admin_panel_keyboard = [
-    ['🆕 Новые заявки механики', '🔄 В работе механики'],
-    ['✅ Выполненные механики', '📊 Статистика механики'],
-    ['🔙 Главное меню']
-]
-
-electricity_admin_panel_keyboard = [
-    ['🆕 Новые заявки электрики', '🔄 В работе электрики'],
-    ['✅ Выполненные электрики', '📊 Статистика электрики'],
-    ['🔙 Главное меню']
-]
-
-# 🏢 Выбор отдела
-department_keyboard = [
-    ['💻 IT отдел', '🔧 Механика'],
-    ['⚡ Электрика', '🔙 Назад в меню']
-]
-
 # ==================== ПОКАЗ ЗАЯВОК С INLINE КНОПКАМИ ====================
 
 async def show_new_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -991,6 +1665,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == '🔙 Главное меню':
         await show_main_menu(update, context)
     
+    # Обработка кнопок админ-панелей отделов
+    elif text in ['💻 IT админ-панель', '🔧 Механика админ-панель', '⚡ Электрика админ-панель']:
+        await show_department_admin_panel(update, context)
+    
     # Обработка кнопок новых заявок
     elif text in ['🆕 Новые заявки IT', '🆕 Новые заявки механики', '🆕 Новые заявки электрики']:
         await show_new_requests(update, context)
@@ -1005,6 +1683,42 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 resize_keyboard=True
             )
         )
+
+async def show_department_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает админ-панель для конкретного отдела"""
+    user_id = update.message.from_user.id
+    text = update.message.text
+    
+    department_map = {
+        '💻 IT админ-панель': '💻 IT отдел',
+        '🔧 Механика админ-панель': '🔧 Механика', 
+        '⚡ Электрика админ-панель': '⚡ Электрика'
+    }
+    
+    if text not in department_map:
+        await update.message.reply_text("❌ Неверный выбор отдела")
+        return
+    
+    department = department_map[text]
+    
+    # Проверяем права доступа
+    if not Config.is_admin(user_id, department):
+        await update.message.reply_text(f"❌ У вас нет доступа к админ-панели {department}")
+        return
+    
+    # Показываем соответствующую клавиатуру
+    keyboard_map = {
+        '💻 IT отдел': it_admin_panel_keyboard,
+        '🔧 Механика': mechanics_admin_panel_keyboard,
+        '⚡ Электрика': electricity_admin_panel_keyboard
+    }
+    
+    await update.message.reply_text(
+        f"👑 *АДМИН-ПАНЕЛЬ {department}*\n\n"
+        f"Управление заявками вашего отдела:",
+        reply_markup=ReplyKeyboardMarkup(keyboard_map[department], resize_keyboard=True),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ==================== ЗАПУСК БОТА ====================
 
@@ -1033,6 +1747,33 @@ def main() -> None:
         
         # Обработчики текстовых сообщений для меню
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+        
+        # Обработчик создания заявки
+        conv_handler = ConversationHandler(
+            entry_points=[
+                MessageHandler(filters.Regex('^(🎯 Создать заявку)$'), start_request_creation),
+            ],
+            states={
+                NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+                PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+                DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, department)],
+                SYSTEM_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, system_type)],
+                PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plot)],
+                OTHER_PLOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, other_plot)],
+                PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, problem)],
+                URGENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, urgency)],
+                PHOTO: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, photo),
+                    MessageHandler(filters.PHOTO, photo)
+                ],
+            },
+            fallbacks=[
+                CommandHandler('cancel', cancel_request),
+                MessageHandler(filters.Regex('^(🔙 Главное меню|🔙 Отменить)$'), cancel_request),
+            ],
+        )
+        
+        application.add_handler(conv_handler)
         
         logger.info("🤖 Бот заявок успешно запущен!")
         print("✅ Бот успешно запущен!")
