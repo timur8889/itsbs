@@ -1036,4 +1036,36 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ... (остальной код остается таким же, как в предыдущей версии)
+# ==================== ЗАПУСК И ДИАГНОСТИКА ====================
+
+if __name__ == '__main__':
+    try:
+        print("🔄 Запуск бота...")
+        print(f"📝 Проверка конфигурации...")
+        Config.validate_config()
+        print("✅ Конфигурация проверена")
+        
+        print("🗄️ Инициализация базы данных...")
+        db = EnhancedDatabase(Config.DB_PATH)
+        print("✅ База данных готова")
+        
+        print("🤖 Создание приложения...")
+        application = Application.builder().token(Config.BOT_TOKEN).build()
+        print("✅ Приложение создано")
+        
+        print("🔧 Настройка обработчиков...")
+        setup_handlers(application)
+        print("✅ Обработчики настроены")
+        
+        print("⏰ Настройка автоматических задач...")
+        setup_automated_tasks(application)
+        print("✅ Задачи настроены")
+        
+        print("🚀 ЗАПУСК БОТА...")
+        application.run_polling()
+        
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        logger.error(f"Критическая ошибка запуска: {e}")
+        import traceback
+        traceback.print_exc()
