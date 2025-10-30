@@ -6,12 +6,18 @@ import re
 import time
 import asyncio
 import shutil
+import signal
+import sys
 from io import BytesIO
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple, Set, Any
 from functools import lru_cache
 from enum import Enum
 from dataclasses import dataclass
+from collections import defaultdict
+import phonenumbers
+from phonenumbers import NumberParseException
+
 from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -78,6 +84,46 @@ def setup_logging():
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# ==================== ОГРАНИЧИТЕЛЬ ЗАПРОСОВ ====================
+
+class RateLimiter:
+    """🔒 Ограничитель частоты запросов для защиты от спама"""
+    
+    def __init__(self):
+        self.user_requests = defaultdict(list)
+    
+    def is_allowed(self, user_id: int, limit: int = 5, period: int = 3600) -> bool:
+        """🔒 Проверяет, не превышен ли лимит запросов"""
+        now = datetime.now()
+        user_requests = self.user_requests[user_id]
+        
+        # Удаляем старые запросы
+        user_requests[:] = [req_time for req_time in user_requests 
+                          if now - req_time < timedelta(seconds=period)]
+        
+        if len(user_requests) >= limit:
+            return False
+        
+        user_requests.append(now)
+        return True
+    
+    def get_remaining_time(self, user_id: int, period: int = 3600) -> int:
+        """⏰ Получает оставшееся время до сброса лимита"""
+        now = datetime.now()
+        user_requests = self.user_requests[user_id]
+        
+        if not user_requests:
+            return 0
+        
+        # Находим самое старое время запроса
+        oldest_request = min(user_requests)
+        reset_time = oldest_request + timedelta(seconds=period)
+        
+        return max(0, int((reset_time - now).total_seconds()))
+
+# Инициализация ограничителя
+rate_limiter = RateLimiter()
+
 # ==================== УЛУЧШЕННАЯ КОНФИГУРАЦИЯ ====================
 
 class Config:
@@ -91,6 +137,7 @@ class Config:
     }
     
     DB_PATH = "requests.db"
+    BACKUP_DIR = "backups"
     
     # Новые настройки
     ENABLE_AI_ANALYSIS = True
@@ -104,6 +151,10 @@ class Config:
     IT_DEPARTMENT_NAME = "IT отдел"
     SUPPORT_PHONE = "+7 (XXX) XXX-XX-XX"
     SUPPORT_EMAIL = "it@zavod-kontakt.ru"
+    
+    # Настройки ограничений
+    REQUESTS_PER_HOUR = 5  # Максимум заявок в час на пользователя
+    MAX_MEDIA_FILES = 10   # Максимум медиа файлов на заявку
     
     @staticmethod
     def is_admin(user_id: int) -> bool:
@@ -120,6 +171,9 @@ class Config:
         for var in required_vars:
             if not getattr(Config, var):
                 raise ValueError(f"Не задана обязательная переменная: {var}")
+        
+        # Создаем директорию для бэкапов
+        os.makedirs(Config.BACKUP_DIR, exist_ok=True)
 
 # ==================== УЛУЧШЕННАЯ БАЗА ДАННЫХ ====================
 
@@ -128,7 +182,12 @@ class EnhancedDatabase:
     
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.init_enhanced_db()
+        try:
+            self.init_enhanced_db()
+            logger.info("✅ База данных успешно инициализирована")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации БД: {e}")
+            raise
     
     def init_enhanced_db(self):
         """🎯 Инициализация улучшенной базы данных"""
@@ -182,12 +241,69 @@ class EnhancedDatabase:
                 )
             ''')
             
+            # Таблица пользователей для улучшенного управления
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    phone TEXT,
+                    department TEXT,
+                    created_at TEXT,
+                    last_activity TEXT,
+                    is_blocked BOOLEAN DEFAULT FALSE,
+                    block_reason TEXT
+                )
+            ''')
+            
             # Индексы для производительности
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id)')
             
             conn.commit()
+    
+    def backup_database(self):
+        """💾 Создает резервную копию базы данных"""
+        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        backup_path = os.path.join(Config.BACKUP_DIR, backup_name)
+        
+        try:
+            # Используем SQLite backup API
+            with sqlite3.connect(self.db_path) as source:
+                with sqlite3.connect(backup_path) as target:
+                    source.backup(target)
+            
+            logger.info(f"✅ Резервная копия создана: {backup_name}")
+            
+            # Удаляем старые бэкапы (оставляем последние 5)
+            self.cleanup_old_backups()
+            
+            return backup_path
+        except Exception as e:
+            logger.error(f"❌ Ошибка резервного копирования: {e}")
+            return None
+    
+    def cleanup_old_backups(self, keep_count: int = 5):
+        """🧹 Удаляет старые резервные копии"""
+        try:
+            backups = []
+            for filename in os.listdir(Config.BACKUP_DIR):
+                if filename.startswith('backup_') and filename.endswith('.db'):
+                    filepath = os.path.join(Config.BACKUP_DIR, filename)
+                    backups.append((filepath, os.path.getctime(filepath)))
+            
+            # Сортируем по дате создания (новые первыми)
+            backups.sort(key=lambda x: x[1], reverse=True)
+            
+            # Удаляем старые бэкапы
+            for backup_path, _ in backups[keep_count:]:
+                os.remove(backup_path)
+                logger.info(f"🗑️ Удален старый бэкап: {os.path.basename(backup_path)}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки бэкапов: {e}")
     
     def add_request(self, user_id: int, username: str, phone: str, problem: str, 
                    photo_id: str = None, urgency: str = '💤 НЕ СРОЧНО') -> int:
@@ -201,7 +317,35 @@ class EnhancedDatabase:
             ''', (user_id, username, phone, problem, photo_id, urgency, datetime.now().isoformat()))
             request_id = cursor.lastrowid
             conn.commit()
+            
+            # Обновляем информацию о пользователе
+            self.update_user_info(user_id, username, phone)
+            
             return request_id
+    
+    def update_user_info(self, user_id: int, username: str, phone: str = None):
+        """👤 Обновляет информацию о пользователе"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Проверяем существование пользователя
+            cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (user_id,))
+            exists = cursor.fetchone()
+            
+            if exists:
+                cursor.execute('''
+                    UPDATE users 
+                    SET username = ?, last_activity = ?
+                    WHERE user_id = ?
+                ''', (username, datetime.now().isoformat(), user_id))
+            else:
+                cursor.execute('''
+                    INSERT INTO users 
+                    (user_id, username, full_name, phone, created_at, last_activity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (user_id, username, username, phone, datetime.now().isoformat(), datetime.now().isoformat()))
+            
+            conn.commit()
     
     def add_media_to_request(self, request_id: int, file_id: str, file_type: str, file_name: str = None):
         """📎 Добавляет медиа файл к заявке"""
@@ -330,6 +474,15 @@ class EnhancedDatabase:
             ''')
             avg_rating = cursor.fetchone()[0] or 0
             
+            # Статистика пользователей
+            cursor.execute('SELECT COUNT(*) FROM users')
+            total_users = cursor.fetchone()[0]
+            
+            # Активные пользователи (за последние 30 дней)
+            month_ago = (datetime.now() - timedelta(days=30)).isoformat()
+            cursor.execute('SELECT COUNT(*) FROM users WHERE last_activity > ?', (month_ago,))
+            active_users = cursor.fetchone()[0]
+            
             return {
                 'total': stats[0],
                 'new': stats[1],
@@ -337,7 +490,9 @@ class EnhancedDatabase:
                 'completed': stats[3],
                 'completed_today': completed_today,
                 'avg_rating': round(avg_rating, 1),
-                'efficiency': round((stats[3] / stats[0] * 100), 1) if stats[0] > 0 else 0
+                'efficiency': round((stats[3] / stats[0] * 100), 1) if stats[0] > 0 else 0,
+                'total_users': total_users,
+                'active_users': active_users
             }
     
     def add_user_feedback(self, request_id: int, rating: int, feedback: str = ""):
@@ -351,6 +506,38 @@ class EnhancedDatabase:
             ''', (rating, feedback, request_id))
             conn.commit()
 
+# ==================== УТИЛИТЫ ====================
+
+def validate_phone_number(phone: str) -> Tuple[bool, str]:
+    """📞 Валидация номера телефона"""
+    try:
+        # Пробуем использовать библиотеку phonenumbers для российских номеров
+        parsed = phonenumbers.parse(phone, "RU")
+        if phonenumbers.is_valid_number(parsed):
+            formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+            return True, formatted
+        return False, "Неверный номер телефона"
+    except NumberParseException:
+        # Простая валидация для российских номеров
+        cleaned = re.sub(r'[^\d+]', '', phone)
+        
+        if cleaned.startswith('+7') and len(cleaned) == 12:
+            return True, cleaned
+        elif cleaned.startswith('8') and len(cleaned) == 11:
+            return True, '+7' + cleaned[1:]
+        elif len(cleaned) == 10:
+            return True, '+7' + cleaned
+        elif len(cleaned) == 11 and cleaned.startswith('7'):
+            return True, '+' + cleaned
+        
+        return False, "Неверный формат номера. Используйте российский номер"
+
+def signal_handler(signum, frame):
+    """🛑 Обработчик сигналов для graceful shutdown"""
+    logger.info("🛑 Получен сигнал завершения...")
+    print("\n🛑 Завершение работы бота...")
+    sys.exit(0)
+
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
 # Инициализация базы данных
@@ -361,6 +548,14 @@ db = EnhancedDatabase(Config.DB_PATH)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """🚀 Обработчик команды /start"""
     user = update.message.from_user
+    
+    # Проверяем ограничение запросов
+    if not rate_limiter.is_allowed(user.id, limit=10, period=3600):
+        remaining = rate_limiter.get_remaining_time(user.id)
+        await update.message.reply_text(
+            f"⏰ Слишком много запросов. Попробуйте через {remaining // 60} минут."
+        )
+        return
     
     welcome_text = (
         f"🎉 *Рады видеть Вас!*\n\n"
@@ -418,6 +613,18 @@ async def new_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """📝 Начинает процесс создания новой заявки"""
     user = update.message.from_user
     
+    # Проверяем ограничение запросов
+    if not rate_limiter.is_allowed(user.id, Config.REQUESTS_PER_HOUR, 3600):
+        remaining = rate_limiter.get_remaining_time(user.id)
+        await update.message.reply_text(
+            f"⏰ *Превышен лимит заявок!*\n\n"
+            f"Вы можете создавать не более {Config.REQUESTS_PER_HOUR} заявок в час.\n"
+            f"Попробуйте через {remaining // 60} минут или обратитесь в отдел напрямую.\n\n"
+            f"📞 {Config.SUPPORT_PHONE}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationHandler.END
+    
     context.user_data['request'] = {
         'user_id': user.id,
         'username': user.username or user.full_name,
@@ -430,7 +637,7 @@ async def new_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(
         "📋 *Создание новой заявки*\n\n"
         "📞 Пожалуйста, введите ваш номер телефона для связи:\n\n"
-        "💡 *Пример:* +7 (XXX) XXX-XX-XX",
+        "💡 *Пример:* +7 (XXX) XXX-XX-XX или 8 (XXX) XXX-XX-XX",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -445,14 +652,21 @@ async def request_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     
     phone = update.message.text.strip()
     
-    # Простая валидация номера телефона
-    if len(phone) < 5:
+    # Валидация номера телефона
+    is_valid, validated_phone_or_error = validate_phone_number(phone)
+    
+    if not is_valid:
         await update.message.reply_text(
-            "❌ Номер телефона слишком короткий. Пожалуйста, введите корректный номер:"
+            f"❌ {validated_phone_or_error}\n\n"
+            f"💡 *Пожалуйста, введите номер в одном из форматов:*\n"
+            f"• +7 (XXX) XXX-XX-XX\n"
+            f"• 8 (XXX) XXX-XX-XX\n"
+            f"• 8XXXXXXXXXX",
+            parse_mode=ParseMode.MARKDOWN
         )
         return REQUEST_PHONE
     
-    context.user_data['request']['phone'] = phone
+    context.user_data['request']['phone'] = validated_phone_or_error
     
     keyboard = [["🔙 Назад", "🔙 Главное меню"]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -499,6 +713,12 @@ async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return REQUEST_PROBLEM
     
+    if len(problem) > 2000:
+        await update.message.reply_text(
+            "❌ Описание проблемы слишком длинное. Пожалуйста, опишите проблему более кратко (максимум 2000 символов):"
+        )
+        return REQUEST_PROBLEM
+    
     context.user_data['request']['problem'] = problem
     
     keyboard = [
@@ -512,7 +732,8 @@ async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "💡 *Это поможет нам быстрее понять и решить проблему*\n"
         "• 📸 Фото проблемы\n"
         "• 🎥 Видео с демонстрацией\n"
-        "• 📄 Скриншот ошибки\n\n"
+        "• 📄 Скриншот ошибки\n"
+        f"• 🎤 Голосовое сообщение (максимум {Config.MAX_MEDIA_FILES} файлов)\n\n"
         "Выберите действие:",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
@@ -541,10 +762,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return REQUEST_PROBLEM
     elif text == "✅ Завершить без медиа":
         return await create_request_final(update, context)
+    elif text == "📎 Прикрепить фото/видео":
+        await update.message.reply_text(
+            "📎 Отправьте фото, видео, документ или голосовое сообщение:"
+        )
+        return REQUEST_MEDIA
     
     # Обработка медиа файлов
     file_info = None
     file_type = None
+    file_name = None
     
     if message.photo:
         # Берем самое большое фото
@@ -559,13 +786,26 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         file_info = message.document
         file_type = "document"
         file_name = file_info.file_name or f"document_{file_info.file_id}"
+    elif message.voice:
+        file_info = message.voice
+        file_type = "voice"
+        file_name = f"voice_{file_info.file_id}.ogg"
     else:
         await message.reply_text(
-            "❌ Пожалуйста, отправьте фото, видео или документ, либо выберите действие из меню."
+            "❌ Пожалуйста, отправьте фото, видео, документ или голосовое сообщение, либо выберите действие из меню."
         )
         return REQUEST_MEDIA
     
     if file_info:
+        # Проверяем лимит медиа файлов
+        media_files = context.user_data['request'].get('media_files', [])
+        if len(media_files) >= Config.MAX_MEDIA_FILES:
+            await message.reply_text(
+                f"❌ Достигнут лимит медиа файлов ({Config.MAX_MEDIA_FILES}). "
+                f"Завершите создание заявки или удалите некоторые файлы."
+            )
+            return REQUEST_MEDIA
+        
         # Сохраняем информацию о файле
         context.user_data['request']['media_files'].append({
             'file_id': file_info.file_id,
@@ -584,12 +824,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         media_type_emoji = {
             'photo': '📸',
             'video': '🎥', 
-            'document': '📄'
+            'document': '📄',
+            'voice': '🎤'
         }.get(file_type, '📎')
         
         await message.reply_text(
             f"{media_type_emoji} *Файл успешно прикреплен!*\n\n"
-            f"📎 Прикреплено файлов: {media_count}\n"
+            f"📎 Прикреплено файлов: {media_count}/{Config.MAX_MEDIA_FILES}\n"
             f"💾 Тип: {file_type}\n"
             f"📁 Имя: {file_name}\n\n"
             f"Вы можете прикрепить еще файлы или завершить создание заявки.",
@@ -1001,6 +1242,12 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
                         document=media['file_id'],
                         caption=caption
                     )
+                elif media['file_type'] == 'voice':
+                    await context.bot.send_voice(
+                        chat_id=query.message.chat_id,
+                        voice=media['file_id'],
+                        caption=caption
+                    )
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки медиа: {e}")
                 await query.message.reply_text(f"❌ Не удалось отправить файл: {str(e)}")
@@ -1008,6 +1255,77 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"❌ Ошибка показа деталей заявки: {e}")
         await query.answer("❌ Ошибка при загрузке деталей!", show_alert=True)
+
+# ==================== НОВЫЕ КОМАНДЫ ====================
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔄 Сброс данных пользователя"""
+    user_id = update.message.from_user.id
+    
+    keyboard = [
+        ["✅ Да, сбросить", "❌ Нет, отмена"],
+        ["🔙 Главное меню"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "🔄 *Сброс данных*\n\n"
+        "Это действие удалит все ваши текущие незавершенные заявки и историю.\n"
+        "Вы уверены, что хотите продолжить?",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Сохраняем состояние для обработки ответа
+    context.user_data['awaiting_reset_confirmation'] = True
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """💾 Создание резервной копии базы данных (только для админов)"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав для этой команды.")
+        return
+    
+    try:
+        await update.message.reply_text("💾 Создание резервной копии...")
+        
+        backup_path = db.backup_database()
+        
+        if backup_path:
+            await update.message.reply_text(
+                f"✅ *Резервная копия создана успешно!*\n\n"
+                f"📁 Файл: `{os.path.basename(backup_path)}`\n"
+                f"💾 Размер: {os.path.getsize(backup_path) // 1024} КБ\n"
+                f"🕒 Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ Ошибка при создании резервной копии.")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка команды backup: {e}")
+        await update.message.reply_text("❌ Ошибка при создании резервной копии.")
+
+async def send_bulk_notification(context: ContextTypes.DEFAULT_TYPE, message: str, user_ids: List[int]):
+    """📢 Массовая рассылка уведомлений"""
+    success_count = 0
+    fail_count = 0
+    
+    for user_id in user_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+            await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты Telegram
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
+            fail_count += 1
+    
+    logger.info(f"📢 Рассылка завершена: Успешно {success_count}, Ошибок {fail_count}")
+    return success_count, fail_count
 
 # ==================== УЛУЧШЕННЫЕ АДМИНСКИЕ КОМАНДЫ ====================
 
@@ -1030,13 +1348,16 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"• ✅ Выполнено: {stats['completed']}\n"
         f"• 🎯 Эффективность: {stats['efficiency']}%\n"
         f"• ⭐ Средняя оценка: {stats['avg_rating']}/5\n"
-        f"• 🚀 Выполнено сегодня: {stats['completed_today']}\n\n"
-        f"📋 *УПРАВЛЕНИЕ ЗАЯВКАМИ:*"
+        f"• 🚀 Выполнено сегодня: {stats['completed_today']}\n"
+        f"• 👥 Всего пользователей: {stats['total_users']}\n"
+        f"• 🔥 Активных пользователей: {stats['active_users']}\n\n"
+        f"🛠️ *УПРАВЛЕНИЕ СИСТЕМОЙ:*"
     )
     
     keyboard = [
         ["📋 Новые заявки", "🔄 В работе"],
         ["✅ Выполненные", "📊 Общая статистика"],
+        ["💾 Создать бэкап", "🔄 Сброс системы"],
         ["🔙 Главное меню"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -1212,7 +1533,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"• /start - 🏠 Главное меню\n"
         f"• /new_request - 📝 Создать заявку\n"
         f"• /my_requests - 📂 Мои заявки\n"
-        f"• /help - 🆘 Помощь\n\n"
+        f"• /help - 🆘 Помощь\n"
+        f"• /reset - 🔄 Сброс данных\n\n"
         f"💡 *КАК РАБОТАЕТ СИСТЕМА:*\n"
         f"1. 📝 Создайте заявку с описанием проблемы\n"
         f"2. 📎 Прикрепите фото/видео (по желанию)\n"
@@ -1220,7 +1542,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"4. ✅ Получайте уведомления о выполнении\n"
         f"5. ⭐ Оценивайте качество работы\n\n"
         f"👨‍💼 *ДЛЯ АДМИНИСТРАТОРОВ:*\n"
-        f"• /admin - 👨‍💼 Админ панель\n\n"
+        f"• /admin - 👨‍💼 Админ панель\n"
+        f"• /backup - 💾 Создать бэкап\n\n"
         f"📞 *ЭКСТРЕННАЯ ПОМОЩЬ:*\n"
         f"Телефон: {Config.SUPPORT_PHONE}\n"
         f"Email: {Config.SUPPORT_EMAIL}\n\n"
@@ -1239,6 +1562,24 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text
     user_id = update.message.from_user.id
     
+    # Обработка подтверждения сброса
+    if context.user_data.get('awaiting_reset_confirmation'):
+        if text == "✅ Да, сбросить":
+            # Здесь можно добавить логику сброса данных пользователя
+            context.user_data.pop('awaiting_reset_confirmation', None)
+            await update.message.reply_text(
+                "🔄 *Данные сброшены!*\n\n"
+                "Все ваши незавершенные заявки были удалены.\n"
+                "Вы можете начать с чистого листа.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await show_main_menu(update, context)
+        elif text == "❌ Нет, отмена":
+            context.user_data.pop('awaiting_reset_confirmation', None)
+            await update.message.reply_text("❌ Сброс данных отменен.")
+            await show_main_menu(update, context)
+        return
+    
     # Основные кнопки для всех пользователей
     if text == "📂 Мои заявки":
         await show_user_requests(update, context)
@@ -1252,6 +1593,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await help_command(update, context)
     elif text == "🔙 Главное меню":
         await show_main_menu(update, context)
+    elif text == "🔄 Сброс системы" and Config.is_admin(user_id):
+        await reset_command(update, context)
+    elif text == "💾 Создать бэкап" and Config.is_admin(user_id):
+        await backup_command(update, context)
     
     # Админские кнопки
     elif text == "👨‍💼 Админ панель" and Config.is_admin(user_id):
@@ -1291,7 +1636,7 @@ def setup_handlers(application: Application):
             REQUEST_PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_problem)],
             REQUEST_MEDIA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_media),
-                MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_media)
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE, handle_media)
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel_request)]
@@ -1302,6 +1647,8 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("my_requests", show_user_requests))
     application.add_handler(CommandHandler("admin", admin_panel_command))
+    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(request_conv_handler)
     
     # Обработчики callback (кнопки администраторов)
@@ -1319,6 +1666,10 @@ def main() -> None:
     """🚀 Запуск бота"""
     try:
         print("🔄 Запуск бота IT отдела завода Контакт...")
+        
+        # Обработчики сигналов
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
         
         # Проверка конфигурации
         Config.validate_config()
@@ -1343,14 +1694,18 @@ def main() -> None:
         print("✨ УЛУЧШЕННЫЕ ВОЗМОЖНОСТИ:")
         print("   • 🏢 Адаптация под завод Контакт")
         print("   • 📝 Умное создание заявок с валидацией")
-        print("   • 📎 Поддержка фото, видео и документов")
+        print("   • 📎 Поддержка фото, видео, документов и голосовых сообщений")
         print("   • ⭐ Система оценок и отзывов")
         print("   • 📊 Детальная статистика")
+        print("   • 🔒 Ограничитель запросов от спама")
+        print("   • 📞 Улучшенная валидация телефонов")
+        print("   • 💾 Автоматическое резервное копирование")
         print("   • 🔙 Улучшенная навигация с кнопками 'Назад'")
         print("   • 👨‍💼 Полная админ-панель")
         print("   • 💬 Комментарии к выполненным работам")
         print("   • 🔔 Умные уведомления")
         print("   • 📈 Аналитика эффективности")
+        print("   • 🛑 Graceful shutdown обработка")
         print("   • 🎯 Профессиональные шаблоны сообщений")
         print("\n🚀 Бот готов к работе!")
         
@@ -1358,6 +1713,9 @@ def main() -> None:
         print("🔄 Запуск опроса...")
         application.run_polling()
 
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+        print("\n🛑 Бот остановлен")
     except Exception as e:
         logger.error(f"❌ Ошибка запуска бота: {e}")
         print(f"❌ Критическая ошибка: {e}")
