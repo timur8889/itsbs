@@ -124,6 +124,82 @@ class Config:
             if not getattr(Config, var):
                 raise ValueError(f"Не задана обязательная переменная: {var}")
 
+# ==================== МИГРАЦИИ БАЗЫ ДАННЫХ ====================
+
+class DatabaseMigrator:
+    """Управление миграциями базы данных"""
+    
+    MIGRATIONS = [
+        # Миграция 1: Добавление индексов для производительности
+        '''
+        CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+        CREATE INDEX IF NOT EXISTS idx_requests_department ON requests(department);
+        CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at);
+        CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id);
+        ''',
+        
+        # Миграция 2: Добавление таблицы для истории изменений
+        '''
+        CREATE TABLE IF NOT EXISTS request_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id INTEGER,
+            changed_by INTEGER,
+            change_type TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            changed_at TEXT,
+            FOREIGN KEY (request_id) REFERENCES requests (id)
+        );
+        ''',
+        
+        # Миграция 3: Добавление таблицы пользовательских настроек
+        '''
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            notification_preferences TEXT DEFAULT 'all',
+            language TEXT DEFAULT 'ru',
+            created_at TEXT,
+            updated_at TEXT
+        );
+        '''
+    ]
+    
+    @classmethod
+    def run_migrations(cls, db_path: str):
+        """Выполняет все pending миграции"""
+        try:
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Создаем таблицу для отслеживания миграций
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS migrations (
+                        id INTEGER PRIMARY KEY,
+                        migration_name TEXT,
+                        applied_at TEXT
+                    )
+                ''')
+                
+                # Получаем applied миграции
+                cursor.execute('SELECT id FROM migrations')
+                applied_migrations = set(row[0] for row in cursor.fetchall())
+                
+                # Применяем новые миграции
+                for i, migration_sql in enumerate(cls.MIGRATIONS, 1):
+                    if i not in applied_migrations:
+                        try:
+                            cursor.executescript(migration_sql)
+                            cursor.execute(
+                                'INSERT INTO migrations (id, migration_name, applied_at) VALUES (?, ?, ?)',
+                                (i, f'migration_{i}', datetime.now().isoformat())
+                            )
+                            logger.info(f"✅ Применена миграция #{i}")
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка миграции #{i}: {e}")
+                            raise
+        except Exception as e:
+            logger.error(f"❌ Ошибка выполнения миграций: {e}")
+
 # ==================== УЛУЧШЕННАЯ БАЗА ДАННЫХ ====================
 
 class EnhancedDatabase:
@@ -132,6 +208,8 @@ class EnhancedDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.init_enhanced_db()
+        # Запускаем миграции после инициализации
+        DatabaseMigrator.run_migrations(db_path)
     
     def init_enhanced_db(self):
         """Инициализация улучшенной базы данных"""
@@ -232,6 +310,19 @@ class EnhancedDatabase:
                 VALUES (?, ?, ?, ?)
             ''', default_settings)
             
+            # Добавляем начальные шаблоны ответов
+            initial_templates = [
+                ('💻 IT отдел', 'Перезагрузка', 'Попробуйте перезагрузить компьютер. Если проблема сохранится, сообщите нам.', datetime.now().isoformat()),
+                ('💻 IT отдел', 'Проверка сети', 'Проверьте подключение к сети. Убедитесь, что кабель подключен.', datetime.now().isoformat()),
+                ('🔧 Механика', 'Диагностика', 'Проводим диагностику оборудования. Ожидайте специалиста.', datetime.now().isoformat()),
+                ('⚡ Электрика', 'Проверка питания', 'Проверяем подачу питания. Специалист выезжает к вам.', datetime.now().isoformat()),
+            ]
+            
+            cursor.executemany('''
+                INSERT OR REPLACE INTO response_templates (department, title, template_text, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', initial_templates)
+            
             conn.commit()
     
     def add_request(self, user_id: int, username: str, phone: str, department: str, 
@@ -244,8 +335,17 @@ class EnhancedDatabase:
                 (user_id, username, phone, department, problem, photo_id, urgency, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, username, phone, department, problem, photo_id, urgency, datetime.now().isoformat()))
+            request_id = cursor.lastrowid
+            
+            # Добавляем запись в историю
+            cursor.execute('''
+                INSERT INTO request_history 
+                (request_id, changed_by, change_type, old_value, new_value, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (request_id, user_id, 'created', None, 'new', datetime.now().isoformat()))
+            
             conn.commit()
-            return cursor.lastrowid
+            return request_id
     
     def get_requests(self, status: str = None, department: str = None, limit: int = 50) -> List[Dict]:
         """Получает список заявок"""
@@ -290,6 +390,13 @@ class EnhancedDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
+            # Получаем текущий статус для истории
+            old_status = None
+            cursor.execute('SELECT status FROM requests WHERE id = ?', (request_id,))
+            result = cursor.fetchone()
+            if result:
+                old_status = result[0]
+            
             if status == 'in_progress' and admin_name:
                 cursor.execute('''
                     UPDATE requests 
@@ -308,6 +415,14 @@ class EnhancedDatabase:
                     SET status = ?
                     WHERE id = ?
                 ''', (status, request_id))
+            
+            # Добавляем запись в историю
+            if old_status != status:
+                cursor.execute('''
+                    INSERT INTO request_history 
+                    (request_id, changed_by, change_type, old_value, new_value, changed_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (request_id, admin_name or 'system', 'status_changed', old_status, status, datetime.now().isoformat()))
             
             # Очищаем кэш для этой заявки
             self.get_request_cached.cache_clear()
@@ -423,6 +538,37 @@ class EnhancedDatabase:
                 'by_department': department_stats
             }
 
+# ==================== КЭШИРОВАННАЯ СТАТИСТИКА ====================
+
+class CachedStatistics:
+    """Кэшированная статистика для производительности"""
+    
+    def __init__(self, db):
+        self.db = db
+        self._cache = {}
+        self._cache_time = {}
+    
+    @lru_cache(maxsize=1)
+    def get_statistics_cached(self, force_refresh: bool = False) -> Dict:
+        """Получает статистику с кэшированием на 5 минут"""
+        cache_key = "statistics"
+        
+        if not force_refresh and cache_key in self._cache:
+            if datetime.now() - self._cache_time[cache_key] < timedelta(minutes=5):
+                return self._cache[cache_key]
+        
+        stats = self.db.get_advanced_statistics()
+        self._cache[cache_key] = stats
+        self._cache_time[cache_key] = datetime.now()
+        
+        return stats
+    
+    def clear_cache(self):
+        """Очищает кэш статистики"""
+        self._cache.clear()
+        self._cache_time.clear()
+        self.get_statistics_cached.cache_clear()
+
 # ==================== РЕЙТИНГИ И АНАЛИТИКА ====================
 
 class EnhancedRatingSystem:
@@ -503,8 +649,8 @@ class EnhancedRatingSystem:
 
 # ==================== УМНЫЕ УВЕДОМЛЕНИЯ ====================
 
-class NotificationManager:
-    """Менеджер умных уведомлений"""
+class EnhancedNotificationManager:
+    """Расширенный менеджер умных уведомлений"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -528,6 +674,27 @@ class NotificationManager:
             logger.error(f"Ошибка отправки уведомления: {e}")
             return False
 
+    async def send_department_notification(self, department: str, message: str, exclude_admin: int = None):
+        """Отправляет уведомление всем администраторам отдела"""
+        admin_ids = Config.ADMIN_CHAT_IDS.get(department, [])
+        
+        for admin_id in admin_ids:
+            if admin_id != exclude_admin:  # Исключаем отправителя
+                await self.send_smart_notification(admin_id, message, "normal")
+    
+    async def notify_new_request(self, context: ContextTypes.DEFAULT_TYPE, request: Dict):
+        """Уведомляет о новой заявке"""
+        message = (
+            f"🆕 *НОВАЯ ЗАЯВКА #{request['id']}*\n\n"
+            f"👤 {request['username']} | 📞 {request['phone']}\n"
+            f"🏢 {request['department']}\n"
+            f"🔧 {request['problem'][:100]}...\n"
+            f"⏰ {request['urgency']}\n"
+            f"🕒 {request['created_at'][:16]}"
+        )
+        
+        await self.send_department_notification(request['department'], message)
+
 # ==================== AI АНАЛИЗ ЗАЯВОК ====================
 
 class AIAnalyzer:
@@ -546,31 +713,95 @@ class AIAnalyzer:
     }
     
     @classmethod
+    def get_default_analysis(cls) -> Dict[str, Any]:
+        """Возвращает анализ по умолчанию"""
+        return {
+            'suggested_department': '🏢 Общие',
+            'suggested_urgency': '💤 НЕ СРОЧНО',
+            'confidence_score': 0.0,
+            'department_scores': {},
+            'urgency_scores': {}
+        }
+    
+    @classmethod
     def analyze_problem_text(cls, text: str) -> Dict[str, Any]:
         """Анализирует текст проблемы и предлагает категории"""
-        text_lower = text.lower()
+        try:
+            if not text or len(text.strip()) < 3:
+                return cls.get_default_analysis()
+            
+            text_lower = text.lower()
+            
+            # Анализ отдела
+            department_scores = {}
+            for dept, keywords in cls.KEYWORDS.items():
+                score = sum(1 for keyword in keywords if keyword in text_lower)
+                if score > 0:
+                    department_scores[dept] = score
+            
+            # Анализ срочности
+            urgency_scores = {}
+            for urgency, keywords in cls.URGENCY_KEYWORDS.items():
+                score = sum(1 for keyword in keywords if keyword in text_lower)
+                if score > 0:
+                    urgency_scores[urgency] = score
+            
+            return {
+                'suggested_department': max(department_scores, key=department_scores.get) if department_scores else '🏢 Общие',
+                'suggested_urgency': max(urgency_scores, key=urgency_scores.get) if urgency_scores else '💤 НЕ СРОЧНО',
+                'confidence_score': len([s for s in department_scores.values() if s > 0]) / len(cls.KEYWORDS),
+                'department_scores': department_scores,
+                'urgency_scores': urgency_scores
+            }
+        except Exception as e:
+            logger.error(f"Ошибка AI анализа: {e}")
+            return cls.get_default_analysis()
+
+# ==================== МЕНЕДЖЕР ШАБЛОНОВ ОТВЕТОВ ====================
+
+class ResponseTemplateManager:
+    """Менеджер шаблонов ответов для администраторов"""
+    
+    @staticmethod
+    def get_templates(department: str) -> List[Dict]:
+        """Получает шаблоны ответов для отдела"""
+        with sqlite3.connect(Config.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM response_templates 
+                WHERE department = ? OR department = 'general'
+                ORDER BY department DESC, title
+            ''', (department,))
+            
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    @staticmethod
+    def create_template(department: str, title: str, template_text: str):
+        """Создает новый шаблон ответа"""
+        with sqlite3.connect(Config.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO response_templates (department, title, template_text, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (department, title, template_text, datetime.now().isoformat()))
+            conn.commit()
+
+    @staticmethod
+    def get_template_buttons(department: str) -> List[List[InlineKeyboardButton]]:
+        """Создает кнопки шаблонов ответов"""
+        templates = ResponseTemplateManager.get_templates(department)
+        keyboard = []
         
-        # Анализ отдела
-        department_scores = {}
-        for dept, keywords in cls.KEYWORDS.items():
-            score = sum(1 for keyword in keywords if keyword in text_lower)
-            if score > 0:
-                department_scores[dept] = score
+        for template in templates[:5]:  # Ограничиваем 5 шаблонами
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"📝 {template['title']}",
+                    callback_data=f"template_{template['id']}"
+                )
+            ])
         
-        # Анализ срочности
-        urgency_scores = {}
-        for urgency, keywords in cls.URGENCY_KEYWORDS.items():
-            score = sum(1 for keyword in keywords if keyword in text_lower)
-            if score > 0:
-                urgency_scores[urgency] = score
-        
-        return {
-            'suggested_department': max(department_scores, key=department_scores.get) if department_scores else '🏢 Общие',
-            'suggested_urgency': max(urgency_scores, key=urgency_scores.get) if urgency_scores else '💤 НЕ СРОЧНО',
-            'confidence_score': len([s for s in department_scores.values() if s > 0]) / len(cls.KEYWORDS),
-            'department_scores': department_scores,
-            'urgency_scores': urgency_scores
-        }
+        return keyboard
 
 # ==================== АВТОМАТИЗАЦИЯ РАБОЧИХ ПРОЦЕССОВ ====================
 
@@ -740,10 +971,31 @@ class BackupManager:
         except Exception as e:
             logger.error(f"Ошибка очистки бэкапов: {e}")
 
+    @staticmethod
+    def list_backups() -> List[str]:
+        """Возвращает список доступных бэкапов"""
+        try:
+            backup_dir = "backup"
+            if not os.path.exists(backup_dir):
+                return []
+            
+            backups = []
+            for file in os.listdir(backup_dir):
+                if file.startswith("requests_backup_") and file.endswith(".db"):
+                    file_path = os.path.join(backup_dir, file)
+                    backups.append(file_path)
+            
+            return sorted(backups, reverse=True)
+        except Exception as e:
+            logger.error(f"Ошибка получения списка бэкапов: {e}")
+            return []
+
 # ==================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ====================
 
 # Инициализация улучшенной базы данных
 db = EnhancedDatabase(Config.DB_PATH)
+cached_stats = CachedStatistics(db)
+notification_manager = EnhancedNotificationManager(None)  # Инициализируем позже
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ БОТА ====================
 
@@ -758,7 +1010,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• 📊 Визуальная статистика с графиками\n"
         "• ⭐ Система рейтингов и отзывов\n"
         "• 🔄 Автоматические уведомления\n"
-        "• 💾 Авто-бэкапы данных\n\n"
+        "• 💾 Авто-бэкапы данных\n"
+        "• 📝 Шаблоны ответов\n"
+        "• 🗃️ История изменений\n\n"
         "🎯 *Выберите действие из меню ниже:*"
     )
     
@@ -771,6 +1025,11 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ["📊 Статистика", "🤖 AI Анализ"],
         ["⭐ Рейтинги", "🆘 Помощь"]
     ]
+    
+    # Добавляем админские кнопки для администраторов
+    if Config.is_admin(update.message.from_user.id):
+        keyboard.insert(1, ["👨‍💼 Админ панель", "📋 Все заявки"])
+    
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
@@ -778,6 +1037,184 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
+
+# ==================== ПРОЦЕСС СОЗДАНИЯ ЗАЯВКИ ====================
+
+# Состояния для создания заявки
+REQUEST_PHONE, REQUEST_DEPARTMENT, REQUEST_PROBLEM, REQUEST_PHOTO = range(4)
+
+async def new_request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает процесс создания новой заявки"""
+    user = update.message.from_user
+    
+    context.user_data['request'] = {
+        'user_id': user.id,
+        'username': user.username or user.full_name
+    }
+    
+    await update.message.reply_text(
+        "📋 *Создание новой заявки*\n\n"
+        "📞 Пожалуйста, введите ваш номер телефона:",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return REQUEST_PHONE
+
+async def request_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает номер телефона"""
+    phone = update.message.text
+    context.user_data['request']['phone'] = phone
+    
+    # Клавиатура выбора отдела
+    keyboard = [
+        ["💻 IT отдел", "🔧 Механика"],
+        ["⚡ Электрика", "🏢 Общие"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "🏢 Выберите отдел для заявки:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return REQUEST_DEPARTMENT
+
+async def request_department(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор отдела"""
+    department = update.message.text
+    context.user_data['request']['department'] = department
+    
+    await update.message.reply_text(
+        "🔧 Опишите вашу проблему подробно:\n\n"
+        "💡 *Совет:* Опишите проблему как можно подробнее, "
+        "это поможет AI автоматически определить срочность и категорию.",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return REQUEST_PROBLEM
+
+async def request_problem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает описание проблемы"""
+    problem = update.message.text
+    context.user_data['request']['problem'] = problem
+    
+    # AI анализ текста проблемы
+    if Config.ENABLE_AI_ANALYSIS:
+        analysis = AIAnalyzer.analyze_problem_text(problem)
+        context.user_data['request']['ai_analysis'] = analysis
+        
+        # Предлагаем AI рекомендации
+        if analysis['confidence_score'] > 0.3:
+            suggestion_text = (
+                f"🤖 *AI РЕКОМЕНДАЦИЯ:*\n\n"
+                f"🏢 Отдел: {analysis['suggested_department']}\n"
+                f"⏰ Срочность: {analysis['suggested_urgency']}\n"
+                f"🎯 Уверенность: {analysis['confidence_score']:.1%}\n\n"
+                f"Использовать рекомендации AI?"
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Да", callback_data="use_ai_yes"),
+                    InlineKeyboardButton("❌ Нет", callback_data="use_ai_no")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                suggestion_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return REQUEST_PHOTO
+    
+    # Если AI отключен или низкая уверенность, продолжаем
+    return await create_request_final(update, context)
+
+async def use_ai_recommendation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор использования AI рекомендаций"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "use_ai_yes":
+        analysis = context.user_data['request']['ai_analysis']
+        context.user_data['request']['department'] = analysis['suggested_department']
+        context.user_data['request']['urgency'] = analysis['suggested_urgency']
+        
+        await query.edit_message_text(
+            f"✅ Использую AI рекомендации:\n"
+            f"🏢 Отдел: {analysis['suggested_department']}\n"
+            f"⏰ Срочность: {analysis['suggested_urgency']}"
+        )
+    
+    return await create_request_final(update, context)
+
+async def create_request_final(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершает создание заявки"""
+    try:
+        request_data = context.user_data['request']
+        
+        # Создаем заявку в базе данных
+        request_id = db.add_request(
+            user_id=request_data['user_id'],
+            username=request_data['username'],
+            phone=request_data['phone'],
+            department=request_data['department'],
+            problem=request_data['problem'],
+            urgency=request_data.get('urgency', '💤 НЕ СРОЧНО')
+        )
+        
+        # Отправляем уведомление администраторам
+        notification_manager.bot = context.bot
+        await notification_manager.notify_new_request(context, {
+            'id': request_id,
+            'username': request_data['username'],
+            'phone': request_data['phone'],
+            'department': request_data['department'],
+            'problem': request_data['problem'],
+            'urgency': request_data.get('urgency', '💤 НЕ СРОЧНО'),
+            'created_at': datetime.now().isoformat()
+        })
+        
+        success_text = (
+            f"✅ *Заявка #{request_id} успешно создана!*\n\n"
+            f"🏢 *Отдел:* {request_data['department']}\n"
+            f"⏰ *Срочность:* {request_data.get('urgency', '💤 НЕ СРОЧНО')}\n"
+            f"📞 *Ваш телефон:* {request_data['phone']}\n\n"
+            f"🔧 *Проблема:* {request_data['problem']}\n\n"
+            f"📊 Вы можете отслеживать статус заявки в разделе \"Мои заявки\""
+        )
+        
+        await context.bot.send_message(
+            chat_id=request_data['user_id'],
+            text=success_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Очищаем данные
+        context.user_data.clear()
+        
+        await show_main_menu(update, context)
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания заявки: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при создании заявки. Пожалуйста, попробуйте позже."
+        )
+        return ConversationHandler.END
+
+async def cancel_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет создание заявки"""
+    context.user_data.clear()
+    await update.message.reply_text(
+        "❌ Создание заявки отменено.",
+        reply_markup=ReplyKeyboardMarkup([["📋 Создать заявку"]], resize_keyboard=True)
+    )
+    return ConversationHandler.END
 
 # ==================== УЛУЧШЕННЫЕ КОМАНДЫ АДМИНИСТРИРОВАНИЯ ====================
 
@@ -793,7 +1230,7 @@ async def enhanced_statistics_command(update: Update, context: ContextTypes.DEFA
         # Показываем сообщение о загрузке
         loading_msg = await update.message.reply_text("📊 *Загружаем статистику...*", parse_mode=ParseMode.MARKDOWN)
         
-        stats = db.get_advanced_statistics()
+        stats = cached_stats.get_statistics_cached()
         
         # Создаем график
         plot_buffer = DataVisualizer.create_statistics_plot(stats)
@@ -1038,6 +1475,79 @@ async def check_timeouts(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка проверки таймаутов: {e}")
 
+# ==================== КОМАНДА ВОССТАНОВЛЕНИЯ ИЗ БЭКАПА ====================
+
+async def restore_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Восстановление из бэкапа (только для супер-админов)"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in Config.SUPER_ADMIN_IDS:
+        await update.message.reply_text("❌ Только для супер-администраторов.")
+        return
+    
+    backups = BackupManager.list_backups()
+    
+    if not backups:
+        await update.message.reply_text("📭 Бэкапы не найдены.")
+        return
+    
+    keyboard = []
+    for backup in backups[:5]:  # Показываем последние 5 бэкапов
+        backup_name = os.path.basename(backup)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📁 {backup_name}",
+                callback_data=f"restore_{backup}"
+            )
+        ])
+    
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="restore_cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🔄 *Восстановление из бэкапа*\n\n"
+        "Выберите бэкап для восстановления:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def restore_backup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка выбора бэкапа для восстановления"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "restore_cancel":
+        await query.edit_message_text("❌ Восстановление отменено.")
+        return
+    
+    if query.data.startswith('restore_'):
+        backup_path = query.data.replace('restore_', '')
+        
+        try:
+            # Создаем резервную копию текущей базы
+            current_backup = BackupManager.create_backup()
+            
+            # Восстанавливаем из выбранного бэкапа
+            shutil.copy2(backup_path, Config.DB_PATH)
+            
+            # Очищаем кэш
+            cached_stats.clear_cache()
+            
+            await query.edit_message_text(
+                f"✅ *База данных восстановлена!*\n\n"
+                f"📁 Восстановлено из: `{os.path.basename(backup_path)}`\n"
+                f"💾 Текущая база сохранена как: `{os.path.basename(current_backup)}`\n\n"
+                f"🔄 Кэш статистики очищен.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка восстановления бэкапа: {e}")
+            await query.edit_message_text(
+                f"❌ Ошибка восстановления: {str(e)}"
+            )
+
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
 async def show_user_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1085,7 +1595,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /stats - Статистика заявок\n"
         "• /requests - Список заявок\n"
         "• /assign [id] - Взять заявку\n"
-        "• /complete [id] - Завершить заявку\n\n"
+        "• /complete [id] - Завершить заявку\n"
+        "• /restore_backup - Восстановить из бэкапа\n\n"
         "💡 *Совет:* Используйте кнопки меню для быстрого доступа к функциям!"
     )
     
@@ -1110,13 +1621,52 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text == "📋 Мои заявки":
         await show_user_requests(update, context)
     elif text == "📋 Создать заявку":
-        await update.message.reply_text("Для создания заявки используйте команду /new_request")
+        await new_request_command(update, context)
+    elif text == "👨‍💼 Админ панель" and Config.is_admin(user_id):
+        await admin_panel_command(update, context)
+    elif text == "📋 Все заявки" and Config.is_admin(user_id):
+        await admin_requests_command(update, context)
     elif text == "🆘 Помощь":
         await help_command(update, context)
     else:
         await update.message.reply_text("Пожалуйста, используйте кнопки меню или команды.")
 
 # ==================== АДМИНСКИЕ КОМАНДЫ ====================
+
+async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает админскую панель"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    admin_text = (
+        "👨‍💼 *АДМИН ПАНЕЛЬ*\n\n"
+        "📊 *Статистика:*\n"
+        "• /stats - Расширенная статистика\n"
+        "• /ratings - Рейтинги администраторов\n\n"
+        "📋 *Управление заявками:*\n"
+        "• /requests - Список новых заявок\n"
+        "• /assign [id] - Взять заявку в работу\n"
+        "• /complete [id] - Завершить заявку\n\n"
+        "⚙️ *Система:*\n"
+        "• /restore_backup - Восстановление из бэкапа\n"
+        "• /clear_cache - Очистка кэша\n\n"
+        "💡 *Быстрые действия:*"
+    )
+    
+    keyboard = [
+        ["📊 Обновить статистику", "📋 Новые заявки"],
+        ["⭐ Рейтинги", "🔄 Бэкап"],
+        ["🎯 Главное меню"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        admin_text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def admin_requests_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает заявки для администратора"""
@@ -1226,15 +1776,43 @@ async def complete_request_command(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"Ошибка завершения заявки: {e}")
         await update.message.reply_text("❌ Ошибка при завершении заявки.")
 
+async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Очищает кэш статистики"""
+    user_id = update.message.from_user.id
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет прав администратора.")
+        return
+    
+    try:
+        cached_stats.clear_cache()
+        await update.message.reply_text("✅ Кэш статистики очищен!")
+    except Exception as e:
+        logger.error(f"Ошибка очистки кэша: {e}")
+        await update.message.reply_text("❌ Ошибка при очистке кэша.")
+
 # ==================== НАСТРОЙКА ОБРАБОТЧИКОВ ====================
 
 def setup_handlers(application: Application):
     """Настройка всех обработчиков"""
     
+    # Обработчик создания заявки (ConversationHandler)
+    request_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("new_request", new_request_command),
+                     MessageHandler(filters.Text("📋 Создать заявку"), new_request_command)],
+        states={
+            REQUEST_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_phone)],
+            REQUEST_DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_department)],
+            REQUEST_PROBLEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_problem)],
+            REQUEST_PHOTO: [CallbackQueryHandler(use_ai_recommendation, pattern="^use_ai_")]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_request)]
+    )
+    
     # Основные команды
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("my_requests", show_user_requests))
+    application.add_handler(request_conv_handler)
     
     # AI и аналитика
     application.add_handler(CommandHandler("ai_analysis", ai_analysis_command))
@@ -1246,9 +1824,12 @@ def setup_handlers(application: Application):
     application.add_handler(CommandHandler("requests", admin_requests_command))
     application.add_handler(CommandHandler("assign", assign_request_command))
     application.add_handler(CommandHandler("complete", complete_request_command))
+    application.add_handler(CommandHandler("restore_backup", restore_backup_command))
+    application.add_handler(CommandHandler("clear_cache", clear_cache_command))
     
-    # Обработчики callback (рейтинги)
+    # Обработчики callback
     application.add_handler(CallbackQueryHandler(request_rating_callback, pattern="^rate_"))
+    application.add_handler(CallbackQueryHandler(restore_backup_callback, pattern="^restore_"))
     
     # Обработчики текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
@@ -1285,6 +1866,10 @@ def enhanced_main() -> None:
         
         application = Application.builder().token(Config.BOT_TOKEN).build()
         
+        # Инициализируем менеджер уведомлений
+        global notification_manager
+        notification_manager = EnhancedNotificationManager(application.bot)
+        
         # Настройка задач и обработчиков
         setup_automated_tasks(application)
         setup_handlers(application)
@@ -1302,6 +1887,10 @@ def enhanced_main() -> None:
         print("   • 🔧 Автоматизация рабочих процессов")
         print("   • 🗃️ Кэширование для производительности")
         print("   • 👨‍💼 Полный набор админских команд")
+        print("   • 📝 Многошаговое создание заявок")
+        print("   • 🗄️ Система миграций базы данных")
+        print("   • 🔄 Восстановление из бэкапов")
+        print("   • 📋 Шаблоны ответов")
         print("\n🚀 Бот готов к работе!")
         
         application.run_polling()
