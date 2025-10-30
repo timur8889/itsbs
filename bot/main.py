@@ -5,8 +5,10 @@ import json
 import re
 import time
 import asyncio
+import shutil
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
+from functools import lru_cache
 from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -87,6 +89,70 @@ class Config:
         """Получает список админов для отдела"""
         return cls.ADMIN_CHAT_IDS.get(department, [])
 
+    @classmethod
+    def validate_config(cls):
+        """Проверка конфигурации при запуске"""
+        required_vars = ['BOT_TOKEN']
+        missing_vars = [var for var in required_vars if not getattr(cls, var)]
+        
+        if missing_vars:
+            raise ValueError(f"Отсутствуют обязательные переменные окружения: {missing_vars}")
+        
+        # Проверка структуры админов
+        for dept, admins in cls.ADMIN_CHAT_IDS.items():
+            if not isinstance(admins, list) or not all(isinstance(admin_id, int) for admin_id in admins):
+                raise ValueError(f"Неверная структура админов для отдела: {dept}")
+        
+        logger.info("✅ Конфигурация успешно проверена")
+
+# ==================== БЭКАП МЕНЕДЖЕР ====================
+
+class BackupManager:
+    """Менеджер бэкапов базы данных"""
+    
+    @staticmethod
+    def create_backup():
+        """Создает бэкап базы данных"""
+        try:
+            backup_dir = "backups"
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = f"{backup_dir}/requests_backup_{timestamp}.db"
+            
+            if os.path.exists(Config.DB_PATH):
+                shutil.copy2(Config.DB_PATH, backup_file)
+                logger.info(f"✅ Бэкап создан: {backup_file}")
+                return backup_file
+            else:
+                logger.warning("⚠️ Файл базы данных не найден для бэкапа")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания бэкапа: {e}")
+            return None
+    
+    @staticmethod
+    def cleanup_old_backups(max_backups: int = 10):
+        """Удаляет старые бэкапы"""
+        try:
+            backup_dir = "backups"
+            if not os.path.exists(backup_dir):
+                return
+            
+            backups = sorted(
+                [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) if f.endswith('.db')],
+                key=os.path.getctime
+            )
+            
+            # Удаляем самые старые бэкапы
+            while len(backups) > max_backups:
+                old_backup = backups.pop(0)
+                os.remove(old_backup)
+                logger.info(f"🗑️ Удален старый бэкап: {old_backup}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка очистки старых бэкапов: {e}")
+
 # ==================== ВАЛИДАЦИЯ ====================
 
 class Validators:
@@ -113,6 +179,8 @@ class Validators:
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.retry_count = 3
+        self.retry_delay = 1
         self.init_db()
 
     def init_db(self):
@@ -160,6 +228,21 @@ class Database:
             logger.error(f"❌ Ошибка инициализации базы данных: {e}")
             raise
 
+    def execute_with_retry(self, query: str, params: tuple = ()):
+        """Выполняет запрос с повторными попытками"""
+        for attempt in range(self.retry_count):
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(query, params)
+                    conn.commit()
+                    return cursor
+            except sqlite3.Error as e:
+                logger.warning(f"⚠️ Попытка {attempt + 1} не удалась: {e}")
+                if attempt == self.retry_count - 1:
+                    raise e
+                time.sleep(self.retry_delay)
+
     def save_request(self, user_data: Dict) -> int:
         """Сохраняет заявку в базу данных"""
         try:
@@ -190,6 +273,11 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка при сохранении заявки: {e}")
             raise
+
+    @lru_cache(maxsize=100)
+    def get_request_cached(self, request_id: int) -> Dict:
+        """Получает заявку по ID с кэшированием"""
+        return self.get_request(request_id)
 
     def get_request(self, request_id: int) -> Dict:
         """Получает заявку по ID"""
@@ -239,6 +327,10 @@ class Database:
                 
                 conn.commit()
                 logger.info(f"✅ Статус заявки #{request_id} изменен на '{status}'")
+                
+                # Инвалидируем кэш
+                self.get_request_cached.cache_clear()
+                
         except Exception as e:
             logger.error(f"❌ Ошибка при обновлении статуса заявки #{request_id}: {e}")
             raise
@@ -342,6 +434,60 @@ class Database:
             logger.error(f"❌ Ошибка при получении заявок пользователя {user_id}: {e}")
             return []
 
+    def get_all_user_ids(self) -> List[int]:
+        """Получает все уникальные ID пользователей"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT user_id FROM requests WHERE user_id IS NOT NULL")
+                return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения ID пользователей: {e}")
+            return []
+
+    def get_statistics(self) -> Dict:
+        """Получает статистику по заявкам"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Общая статистика
+                cursor.execute('''
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                        SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as new
+                    FROM requests
+                ''')
+                total_stats = cursor.fetchone()
+                
+                # Статистика по отделам
+                cursor.execute('''
+                    SELECT 
+                        department,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+                    FROM requests 
+                    GROUP BY department
+                ''')
+                dept_stats = cursor.fetchall()
+                
+                return {
+                    'total': total_stats[0] if total_stats else 0,
+                    'completed': total_stats[1] if total_stats else 0,
+                    'in_progress': total_stats[2] if total_stats else 0,
+                    'new': total_stats[3] if total_stats else 0,
+                    'by_department': {
+                        dept: {'total': total, 'completed': completed} 
+                        for dept, total, completed in dept_stats
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            return {}
+
 # Инициализация базы данных
 db = Database(Config.DB_PATH)
 
@@ -371,6 +517,7 @@ super_admin_main_menu_keyboard = [
     ['👑 Супер-админ', '📊 Статистика'],
     ['🎯 Создать заявку', '📂 Мои заявки'],
     ['🔍 Поиск заявки', '🔄 Заявки в работе'],
+    ['📢 Массовая рассылка', '💾 Создать бэкап'],
     ['🔙 Главное меню']
 ]
 
@@ -626,19 +773,97 @@ async def show_user_statistics(update: Update, context: ContextTypes.DEFAULT_TYP
     """Показывает персональную статистику пользователя"""
     user_id = update.message.from_user.id
     
+    # Получаем реальную статистику пользователя
+    user_requests = db.get_user_requests(user_id, limit=1000)
+    total = len(user_requests)
+    completed = len([r for r in user_requests if r['status'] == 'completed'])
+    in_progress = len([r for r in user_requests if r['status'] == 'in_progress'])
+    new = len([r for r in user_requests if r['status'] == 'new'])
+    
+    percentage = (completed / total * 100) if total > 0 else 0
+    
     stats_text = (
         "📊 *ВАША СТАТИСТИКА*\n\n"
-        "📈 *Всего заявок:* 0\n"
-        "✅ *Выполнено:* 0\n"
-        "🔄 *В работе:* 0\n"
-        "📊 *Процент выполнения:* 0%\n\n"
-        "💡 Создайте первую заявку! 🎯"
+        f"📈 *Всего заявок:* {total}\n"
+        f"✅ *Выполнено:* {completed}\n"
+        f"🔄 *В работе:* {in_progress}\n"
+        f"🆕 *Новых:* {new}\n"
+        f"📊 *Процент выполнения:* {percentage:.1f}%\n\n"
     )
+    
+    if total == 0:
+        stats_text += "💡 Создайте первую заявку! 🎯"
     
     await update.message.reply_text(
         stats_text,
         parse_mode=ParseMode.MARKDOWN
     )
+
+async def show_detailed_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает детальную статистику"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой статистике.")
+        return
+    
+    stats = db.get_statistics()
+    
+    stats_text = "📊 *ДЕТАЛЬНАЯ СТАТИСТИКА*\n\n"
+    
+    if stats:
+        total = stats['total']
+        completed = stats['completed']
+        in_progress = stats['in_progress']
+        new = stats['new']
+        
+        percentage = (completed / total * 100) if total > 0 else 0
+        
+        stats_text += f"📈 Всего заявок: *{total}*\n"
+        stats_text += f"✅ Выполнено: *{completed}*\n"
+        stats_text += f"🔄 В работе: *{in_progress}*\n"
+        stats_text += f"🆕 Новых: *{new}*\n"
+        stats_text += f"📊 Процент выполнения: *{percentage:.1f}%*\n\n"
+        
+        stats_text += "🏢 *По отделам:*\n"
+        for dept, dept_stats in stats.get('by_department', {}).items():
+            dept_total = dept_stats['total']
+            dept_completed = dept_stats['completed']
+            dept_percentage = (dept_completed / dept_total * 100) if dept_total > 0 else 0
+            stats_text += f"• {dept}: {dept_completed}/{dept_total} ({dept_percentage:.1f}%)\n"
+    else:
+        stats_text += "📭 Нет данных для отображения"
+    
+    await update.message.reply_text(
+        stats_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def create_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Создает бэкап базы данных"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой команде.")
+        return
+    
+    try:
+        backup_file = BackupManager.create_backup()
+        if backup_file:
+            await update.message.reply_text(
+                f"✅ *Бэкап успешно создан!*\n\n"
+                f"📁 Файл: `{backup_file}`\n\n"
+                f"💾 Бэкапы хранятся в папке `backups/`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            # Очищаем старые бэкапы
+            BackupManager.cleanup_old_backups()
+        else:
+            await update.message.reply_text("❌ Не удалось создать бэкап")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания бэкапа: {e}")
+        await update.message.reply_text("❌ Ошибка при создании бэкапа")
 
 async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает заявки пользователя"""
@@ -652,6 +877,11 @@ async def show_my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode=ParseMode.MARKDOWN
         )
         return
+    
+    await update.message.reply_text(
+        f"📂 *Ваши заявки ({len(requests)}):*",
+        parse_mode=ParseMode.MARKDOWN
+    )
     
     for request in requests[:5]:  # Показываем последние 5 заявок
         status_emoji = {
@@ -683,6 +913,116 @@ async def search_requests_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         "Функция поиска в разработке...",
         parse_mode=ParseMode.MARKDOWN
     )
+
+# ==================== МАССОВАЯ РАССЫЛКА ====================
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Массовая рассылка для супер-админа"""
+    user_id = update.message.from_user.id
+    
+    if not Config.is_super_admin(user_id):
+        await update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    # Сохраняем состояние рассылки
+    context.user_data['broadcasting'] = True
+    
+    await update.message.reply_text(
+        "📢 *МАССОВАЯ РАССЫЛКА*\n\n"
+        "Введите сообщение для рассылки всем пользователям:",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=ReplyKeyboardMarkup([['❌ Отменить рассылку']], resize_keyboard=True)
+    )
+
+async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает массовую рассылку"""
+    user_id = update.message.from_user.id
+    
+    # Проверяем отмену
+    if update.message.text == '❌ Отменить рассылку':
+        context.user_data.pop('broadcasting', None)
+        await show_main_menu(update, context)
+        return
+    
+    if not context.user_data.get('broadcasting'):
+        return
+    
+    if not Config.is_super_admin(user_id):
+        return
+    
+    message_text = update.message.text
+    
+    # Получаем всех уникальных пользователей из заявок
+    try:
+        user_ids = db.get_all_user_ids()
+        
+        if not user_ids:
+            await update.message.reply_text(
+                "❌ Нет пользователей для рассылки",
+                reply_markup=ReplyKeyboardMarkup(super_admin_main_menu_keyboard, resize_keyboard=True)
+            )
+            context.user_data.pop('broadcasting', None)
+            return
+        
+        await update.message.reply_text(
+            f"📤 *Начинаю рассылку...*\n\n"
+            f"👥 Получателей: {len(user_ids)}\n"
+            f"💬 Сообщение: {message_text[:100]}...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        success_count = 0
+        fail_count = 0
+        failed_users = []
+        
+        for i, uid in enumerate(user_ids):
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📢 *ОБЪЯВЛЕНИЕ*\n\n{message_text}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                success_count += 1
+                
+                # Обновляем прогресс каждые 10 сообщений
+                if (i + 1) % 10 == 0:
+                    await update.message.reply_text(
+                        f"📤 Отправлено {i + 1}/{len(user_ids)} сообщений..."
+                    )
+                
+                await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки пользователю {uid}: {e}")
+                fail_count += 1
+                failed_users.append(uid)
+        
+        # Формируем итоговый отчет
+        result_text = (
+            f"📊 *Результаты рассылки:*\n\n"
+            f"✅ Успешно: *{success_count}*\n"
+            f"❌ Ошибок: *{fail_count}*\n"
+            f"📊 Эффективность: *{success_count/len(user_ids)*100:.1f}%*"
+        )
+        
+        if failed_users:
+            result_text += f"\n\n⚠️ *Не удалось отправить:* {len(failed_users)} пользователей"
+        
+        await update.message.reply_text(
+            result_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(super_admin_main_menu_keyboard, resize_keyboard=True)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка массовой рассылки: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка при рассылке",
+            reply_markup=ReplyKeyboardMarkup(super_admin_main_menu_keyboard, resize_keyboard=True)
+        )
+    
+    finally:
+        context.user_data.pop('broadcasting', None)
 
 # ==================== ОБРАБОТКА СОЗДАНИЯ ЗАЯВКИ ====================
 
@@ -861,7 +1201,7 @@ async def plot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return OTHER_PLOT
     
-    valid_plots = ['🏢 Центральный офис', '🏭 Производство', '📦 Складской комплекс', '🛒 Торговый зал', '💻 Удаленные рабочие места']
+    valid_plots = ['🏢 Центральный офис', '🏭 Проduction', '📦 Складской комплекс', '🛒 Торговый зал', '💻 Удаленные рабочие места']
     if update.message.text not in valid_plots:
         await update.message.reply_text(
             "❌ Пожалуйста, выберите участок из предложенных вариантов:",
@@ -1095,12 +1435,14 @@ async def confirm_request(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             chat_id=admin_id,
                             photo=photo,
                             caption=request_text,
+                            reply_markup=create_request_actions_keyboard(request_id),
                             parse_mode=ParseMode.MARKDOWN
                         )
                 else:
                     await context.bot.send_message(
                         chat_id=admin_id,
                         text=request_text,
+                        reply_markup=create_request_actions_keyboard(request_id),
                         parse_mode=ParseMode.MARKDOWN
                     )
             except Exception as e:
@@ -1193,7 +1535,7 @@ async def take_request_inline(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     try:
         request_id = int(query.data.split('_')[1])
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         
         if not request:
             await query.edit_message_text("❌ Заявка не найдена")
@@ -1218,7 +1560,8 @@ async def take_request_inline(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         
         # Обновляем сообщение
-        request_text = format_request_text(request)
+        updated_request = db.get_request_cached(request_id)
+        request_text = format_request_text(updated_request)
         keyboard = create_request_actions_keyboard(request_id)
         
         await query.edit_message_text(
@@ -1244,7 +1587,7 @@ async def complete_request_inline(update: Update, context: ContextTypes.DEFAULT_
     
     try:
         request_id = int(query.data.split('_')[1])
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         
         if not request:
             await query.edit_message_text("❌ Заявка не найдена")
@@ -1281,7 +1624,7 @@ async def add_comment_inline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         request_id = int(query.data.split('_')[1])
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         
         if not request:
             await query.edit_message_text("❌ Заявка не найдена")
@@ -1324,7 +1667,7 @@ async def show_request_details(update: Update, context: ContextTypes.DEFAULT_TYP
     
     try:
         request_id = int(query.data.split('_')[1])
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         
         if not request:
             await query.edit_message_text("❌ Заявка не найдена")
@@ -1351,7 +1694,7 @@ async def show_request_with_actions(update: Update, context: ContextTypes.DEFAUL
     
     try:
         request_id = int(query.data.split('_')[2])  # back_to_request_123
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         
         if not request:
             await query.edit_message_text("❌ Заявка не найдена")
@@ -1377,6 +1720,11 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.message.from_user.id
     comment_text = update.message.text.strip()
     
+    # Проверяем отмену массовой рассылки
+    if context.user_data.get('broadcasting'):
+        await process_broadcast(update, context)
+        return
+    
     # Проверяем, есть ли активный процесс комментария
     commenting_request_id = context.user_data.get('commenting_request_id')
     completing_request_id = context.user_data.get('completing_request_id')
@@ -1390,14 +1738,13 @@ async def handle_admin_comment(update: Update, context: ContextTypes.DEFAULT_TYP
         await process_comment(update, context, completing_request_id, user_id, comment_text, is_completion=True)
     
     else:
-        await update.message.reply_text(
-            "❌ Нет активного процесса комментария. Используйте кнопки в заявке."
-        )
+        # Если нет активных процессов, обрабатываем как обычное сообщение
+        await handle_text_messages(update, context)
 
 async def process_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, admin_id: int, comment: str, is_completion: bool = False):
     """Обрабатывает комментарий администратора"""
     try:
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         if not request:
             await update.message.reply_text("❌ Заявка не найдена")
             return
@@ -1440,7 +1787,13 @@ async def process_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, re
         
         await update.message.reply_text(
             success_message,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardMarkup(
+                super_admin_main_menu_keyboard if Config.is_super_admin(admin_id) else
+                admin_main_menu_keyboard if Config.is_admin(admin_id) else
+                user_main_menu_keyboard,
+                resize_keyboard=True
+            )
         )
         
     except Exception as e:
@@ -1450,7 +1803,7 @@ async def process_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, re
 async def notify_admins_about_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, admin_name: str, comment: str):
     """Уведомляет админов отдела о новом комментарии"""
     try:
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         if not request:
             return
         
@@ -1599,7 +1952,7 @@ async def show_requests_in_progress(update: Update, context: ContextTypes.DEFAUL
 async def notify_user_about_request_status(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int, status: str, admin_comment: str = None, assigned_admin: str = None):
     """Уведомляет пользователя об изменении статуса заявки"""
     try:
-        request = db.get_request(request_id)
+        request = db.get_request_cached(request_id)
         if not request:
             return
         
@@ -1654,6 +2007,8 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await search_requests_menu(update, context)
     elif text == '📊 Статистика':
         await show_user_statistics(update, context)
+    elif text == '📈 Общая статистика':
+        await show_detailed_statistics(update, context)
     elif text == '🔄 Заявки в работе':
         await show_requests_in_progress(update, context)
     elif text == 'ℹ️ Помощь':
@@ -1662,6 +2017,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
         await show_admin_panel(update, context)
     elif text == '👑 Супер-админ':
         await show_super_admin_panel(update, context)
+    elif text == '📢 Массовая рассылка':
+        await broadcast_message(update, context)
+    elif text == '💾 Создать бэкап':
+        await create_backup_command(update, context)
     elif text == '🔙 Главное меню':
         await show_main_menu(update, context)
     
@@ -1672,6 +2031,10 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     # Обработка кнопок новых заявок
     elif text in ['🆕 Новые заявки IT', '🆕 Новые заявки механики', '🆕 Новые заявки электрики']:
         await show_new_requests(update, context)
+    
+    # Обработка кнопок статистики отделов
+    elif text in ['📊 Статистика IT', '📊 Статистика механики', '📊 Статистика электрики']:
+        await show_detailed_statistics(update, context)
     
     else:
         await update.message.reply_text(
@@ -1725,6 +2088,13 @@ async def show_department_admin_panel(update: Update, context: ContextTypes.DEFA
 def main() -> None:
     """Запускаем бота"""
     try:
+        # Проверка конфигурации
+        Config.validate_config()
+        
+        # Создание бэкапа при запуске
+        BackupManager.create_backup()
+        BackupManager.cleanup_old_backups()
+        
         if not Config.BOT_TOKEN:
             logger.error("❌ Токен бота не загружен!")
             return
@@ -1735,11 +2105,13 @@ def main() -> None:
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("menu", show_main_menu))
         application.add_handler(CommandHandler("help", show_help))
+        application.add_handler(CommandHandler("statistics", show_detailed_statistics))
+        application.add_handler(CommandHandler("backup", create_backup_command))
         
         # Обработчик inline кнопок
         application.add_handler(CallbackQueryHandler(handle_inline_buttons))
         
-        # Обработчик комментариев админов
+        # Обработчик комментариев админов и массовой рассылки
         application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_admin_comment
@@ -1777,10 +2149,14 @@ def main() -> None:
         
         logger.info("🤖 Бот заявок успешно запущен!")
         print("✅ Бот успешно запущен!")
-        print("🎯 Новые возможности:")
-        print("   • 🔘 Визуальные кнопки для управления заявками") 
-        print("   • 💬 Система комментариев для админов")
-        print("   • ✅ Улучшенный интерфейс управления")
+        print("🎯 Улучшенные возможности:")
+        print("   • 🔒 Проверка конфигурации при запуске")
+        print("   • 💾 Автоматические бэкапы базы данных") 
+        print("   • 📊 Детальная статистика по отделам")
+        print("   • 📢 Массовая рассылка для супер-админов")
+        print("   • 🔄 Повторные попытки при ошибках БД")
+        print("   • 🚀 Кэширование для улучшения производительности")
+        print("   • 💬 Улучшенная система комментариев")
         
         application.run_polling()
 
